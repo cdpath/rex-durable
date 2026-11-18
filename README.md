@@ -1,20 +1,31 @@
 # rex-durable
 
-Keep the agent sessions and programs in your [Rex](https://www.superlogical.com/rex) tabs across server restarts and reboots (inspired by Herdr's auto-resume and based on [fazxes/rex-durable](https://github.com/fazxes/rex-durable), extended with **Pi** and **Antigravity CLI (`agy`)** support).
+Automatic agent session & layout persistence for [Rex](https://www.superlogical.com/rex), built around Rex's native Lua, event, action, layout, and `OSC 7501` protocols.
 
-Rex saves your sessions, tabs, and splits when its server stops, and restores them when it starts again—but every pane returns as a fresh shell. `rex-durable` tracks what was running in each pane and automatically resumes your coding agents on their exact conversations:
+Rex saves your sessions, windows (tabs), and splits when its server stops, and restores them when it starts again—but every pane returns as a fresh shell. `rex-durable` watches your workspace in real time and automatically resumes your coding agents on their exact conversations:
 
-| Running in the tab | After a restart |
+| Running in the pane | After a Rex server restart / reboot |
 | --- | --- |
-| **Antigravity CLI (`agy`)** | Reopens on its conversation: `agy --conversation <id>` |
-| **Pi coding agent (`pi`)** | Reopens on its conversation: `pi --session <id>` |
-| **Claude Code (`claude`)** | Reopens on its conversation: `claude --resume <id>` |
-| **Codex (`codex`)** | Reopens on its conversation: `codex resume <id>` |
-| **[fx](https://fx.sh) (`fx`)** | Reopens on its conversation: `fx --resume <id>` |
-| Any other program | Typed at the prompt, not run. Press Enter if you want it. |
-| Plain shell | Left alone |
+| **Antigravity CLI (`agy`)** | Resumes exact conversation: `agy --conversation <id>` |
+| **Pi coding agent (`pi`)** | Resumes exact conversation: `pi --session <id>` (+ native `OSC 7501` tab status!) |
+| **Claude Code (`claude`)** | Resumes exact conversation: `claude --resume <id>` |
+| **Codex (`codex`)** | Resumes exact conversation: `codex resume <id>` |
+| **[fx](https://fx.sh) (`fx`)** | Resumes exact conversation: `fx --resume <id>` |
+| Any other program | Staged at the shell prompt without executing (press Enter to run) |
+| Plain shell | Left untouched |
 
-Chats preserve their CLI options (such as `--model`, `--effort`, `--thinking`, `--mode`, `--sandbox`, `--dangerously-skip-permissions`) and reopen in the exact same tab, split, and directory.
+Chats preserve their CLI options (`--model`, `--effort`, `--thinking`, `--mode`, `--sandbox`, `--dangerously-skip-permissions`, etc.) and come back in the exact same tab, split, working directory, custom block label, focus, and zoom state.
+
+## Rex Best Practices Architecture
+
+Unlike polling/shell-heavy approaches, `rex-durable` is designed specifically around Rex's native APIs:
+
+- **Real-time `terminal.process_changed` event stream**: Runs a single in-process `rex do --all` watcher subscribing to `terminal.process_changed`, `terminal.program_status_changed`, `session_view_changed`, and lifecycle events with bounded trailing burst debouncing (`pending:cancel()` + `rex.after`)—no periodic child `rex` process spawning.
+- **Zero `client_connected` noise (`session.attach_all`)**: Uses `session.attach_all` instead of per-session `session.attach`, so `rex-durable` never pollutes `session.list_clients` or emits spurious client join/leave events.
+- **Native `com.superlogical.terminal.process` & `modes` inspection**: Uses Rex's kernel-resolved `script`, `invoked_path`, and `argv0` fields to identify Node/Bun agent wrappers, skips remote `host_id` blocks, and checks `com.superlogical.terminal.modes` (`screen ~= "alternate"`) before typing into any pane.
+- **Full layout fidelity via `rex.layout.*`**: Rebuilds splits with `rex.layout.horizontal` / `rex.layout.vertical` / `rex.layout.block`, preserving window focus (`w.focused_block_id`), zoomed panes (`w.zoomed_block_id`), and custom block labels (`b.label`).
+- **First-class `rex.action` commands**: Registers typed actions (`durable_status`, `durable_save`, `durable_reopen`, `durable_repair`, `durable_checkpoint`, `durable_rebuild`) with `args` validation schemas—callable from the Command Palette, keybindings (`rex.bind`), or directly via `rex do <action> [--json]`.
+- **Native `OSC 7501` Program Status for Pi**: Since Rex doesn't yet ship a built-in hook for Pi, `extensions/rex-durable.ts` both tracks `REX_BLOCK` $\rightarrow$ `sessionId` + `process.argv` and emits spec-compliant `OSC 7501` (`app=pi`: `idle`, `working`, `blocked`, `done`) so Pi gets native Rex tab spinners and session-picker badges.
 
 ## Install
 
@@ -24,56 +35,43 @@ cd ~/Developer/rex-durable
 ./install.sh --add-to-config
 ```
 
-The installer:
-
-1. Finds Rex's `rex` CLI (preferring `~/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/` on macOS so Rex updates don't break it).
-2. Copies `durable.lua` to `~/Library/Application Support/rex-durable/` on macOS (or `~/.local/share/rex-durable/` on Linux).
-3. Installs the lightweight Pi extension `rex-durable.ts` into `~/.pi/agent/extensions/` (skip with `--no-pi-extension`).
-4. Starts `durable.lua` as a login service (`launchd` agent on macOS, `systemd` user service on Linux).
-5. Installs Rex command palette actions (`~/.config/rex/rex_durable.lua`) and loads them from `~/.config/rex/init.lua` when `--add-to-config` is passed.
-
 ## Usage
 
-Day to day, everything runs automatically: `rex-durable` snapshots active tabs every 30 seconds and 5 seconds after layout/terminal events, and restores chats automatically when a new Rex server instance starts.
-
-Manual commands:
+Day to day, everything is automatic. Whenever you want to inspect or control snapshots manually, use the first-class Rex actions from any terminal (or press `Cmd+Shift+P` and search **"Durable"**):
 
 ```sh
-S="$HOME/Library/Application Support/rex-durable/durable.lua"   # Linux: ~/.local/share/rex-durable/durable.lua
-
-rex do "$S" mode=status                    # inspect saved state & last restore
-rex do "$S" mode=save                      # force an immediate save
-rex do "$S" mode=reopen dry_run=true       # preview what reopen would type
-rex do "$S" mode=reopen                    # reopen programs in their tabs
-rex do "$S" mode=repair dry_run=true       # preview missing tabs repair
-rex do "$S" mode=repair                    # restore tabs closed while Rex stayed up
-rex do "$S" mode=checkpoint name=my-snap   # pin a named checkpoint
-rex do "$S" mode=rebuild from=my-snap yes=true
+rex do durable_status                         # inspect snapshots, checkpoints & last restore (JSON)
+rex do durable_save                           # snapshot immediately
+rex do durable_checkpoint name=before-update  # pin a named checkpoint
+rex do durable_reopen dry_run=true            # preview what reopen would type
+rex do durable_reopen                         # resume saved chats in idle tabs
+rex do durable_repair dry_run=true            # preview missing tabs after a mass close
+rex do durable_repair                         # recreate closed tabs/sessions & resume chats
+rex do durable_rebuild from=before-update yes=true
 ```
 
-Or open the Rex Command Palette (`Cmd+Shift+P`) and search **"durable"**.
+You can also bind keys in `~/.config/rex/init.lua`:
 
-## How `pi` and `agy` Session Tracking Works
-
-- **Antigravity CLI (`agy`)**: `agy` holds `~/.gemini/antigravity-cli/conversations/<id>.db*` and `~/.gemini/antigravity-cli/brain/<id>` open while running. `rex-durable` reads open file descriptors (`lsof` / `/proc`) to identify each pane's exact conversation ID, filters out subagent conversations via `transcript.jsonl`, and prevents reopening a conversation that is already open in another terminal.
-- **Pi (`pi`)**: Combines two layers:
-  1. **Pi Extension (`extensions/rex-durable.ts`)**: When running inside a Rex terminal (`REX_BLOCK`), records `{ block_id, pid, id, session_file, argv }` on `session_start`, `agent_start`, and `agent_settled`. Because `pi` overwrites `process.title = "pi"` on macOS and closes its `.jsonl` file between turns, this extension preserves original CLI flags (`--model`, `--thinking`, etc.), tracks `/resume` and `/fork` switches, and disambiguates multiple `pi` panes in the same directory.
-  2. **Zero-config fallback**: Even without the extension (including already-running `pi` processes), `rex-durable` matches `~/.pi/agent/sessions/--<cwd-slug>--/<timestamp>_<id>.jsonl` by session header `cwd` and modification time, and carries reopened block mappings forward across restarts.
+```lua
+require("rex_durable")
+rex.bind("ctrl+b>ctrl+s", "durable_checkpoint")
+rex.bind("ctrl+b>ctrl+r", "durable_repair")
+```
 
 ## Development & Tests
 
 ```sh
-test/e2e.sh          # unit tests + full isolated e2e test on a throwaway Rex server
+test/e2e.sh          # unit tests + isolated e2e suite on a throwaway Rex server
 test/e2e.sh --unit   # unit tests only
 ```
 
 ## Uninstall
 
 ```sh
-./uninstall.sh          # stop service & remove installed scripts (keeps snapshots)
+./uninstall.sh          # stop service & remove installed scripts/extensions/skills (keeps snapshots)
 ./uninstall.sh --purge  # also delete saved snapshots
 ```
 
-## License
+## Credits & License
 
-[MIT](LICENSE)
+Inspired by Herdr's automatic agent session resumption and [fazxes/rex-durable](https://github.com/fazxes/rex-durable). Released under the [MIT License](LICENSE).

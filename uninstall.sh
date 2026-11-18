@@ -1,5 +1,5 @@
 #!/bin/sh
-# Remove rex-durable: stop its service and delete its files.
+# Remove rex-durable: stop its service and delete its installed files.
 #
 #   ./uninstall.sh          keep your saves, in case you install it again
 #   ./uninstall.sh --purge  delete the saves too
@@ -42,6 +42,8 @@ else
 fi
 
 rm -f "$data/durable.lua" "$config/rex_durable.lua" "$pi_agent_dir/extensions/rex-durable.ts"
+rm -rf "$HOME/.agents/skills/rex-durable" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/rex-durable"
+
 if [ "$purge" = 1 ]; then
   rm -rf "$data" "$state"
   echo "Removed rex-durable and its saves."

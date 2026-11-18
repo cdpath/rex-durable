@@ -20,8 +20,8 @@ fi
 
 T=$(cd "$(mktemp -d /tmp/rex-durable-e2e.XXXXXX)" && pwd -P)
 H=$T/home
-mkdir -p "$H" "$T/bin" "$T/state" "$T/durable" "$T/my proj"
-: >"$T/init.lua"
+mkdir -p "$H" "$T/bin" "$T/state" "$T/durable" "$T/config" "$T/my proj"
+: >"$T/config/init.lua"
 SOCK="unix://$T/rex.sock"
 passed=0
 failed=0
@@ -38,8 +38,9 @@ server_pid=""
 watch_pid=""
 start_server() {
   env -u REX_SESSION -u REX_BLOCK -u REX_SERVER -u REX_CLIENT -u REX_CONFIG \
-      -u PI_CODING_AGENT_DIR -u PI_CODING_AGENT_SESSION_DIR -u REX_DURABLE_STATE_DIR \
-    "$REX" server run --listen "$SOCK" --state-dir "$T/state" --config "$T/init.lua" "$@" \
+      -u PI_CODING_AGENT_DIR -u PI_CODING_AGENT_SESSION_DIR \
+      HOME="$H" REX_DURABLE_STATE_DIR="$T/durable" \
+    "$REX" server run --listen "$SOCK" --state-dir "$T/state" --config "$T/config/init.lua" "$@" \
     >>"$T/server.log" 2>&1 &
   server_pid=$!
   for _ in $(seq 1 50); do
@@ -104,9 +105,19 @@ start_server
 if (cd / && R do "$here/test/unit.lua" "root=$here") >"$T/unit.log" 2>&1; then ok "$(tail -1 "$T/unit.log")"; else cat "$T/unit.log"; bad "unit tests"; fi
 if [ "${1:-}" = "--unit" ]; then echo; echo "$passed passed, $failed failed"; [ "$failed" = 0 ]; exit; fi
 
-echo "1. Save what runs in each tab"
+echo "1. Save what runs in each tab (including custom labels, focus & zoom)"
 R do "$here/test/e2e_setup.lua" "bin=$T/bin" "dir=$T/my proj" >/dev/null
 sleep 3
+D mode=save
+listing=$(show)
+# Label & zoom the agy split pane to test layout fidelity across rebuild & repair
+AGY_BLK=$(block "$listing" work 6.2)
+R do -s work -e "
+  rex.session.set_block_label{ block_id = '$AGY_BLK', label = 'agy-agent' }
+  rex.session.focus_block{ block_id = '$AGY_BLK' }
+  rex.session.zoom_block{ block_id = '$AGY_BLK', zoom = true }
+  return 'ok'
+" >/dev/null
 D mode=save
 listing=$(show)
 expect "fx chat and its conversation" has_line '^work 1\.1 chat fx FXA '
@@ -117,6 +128,9 @@ expect "a plain shell" has_line '^work 4\.1 shell '
 expect "new pi chat from its newest session file" has_line '^work 6\.1 chat pi 00000000-0000-4000-8000-'
 expect "agy chat from its open brain directory" has_line "^work 6\.2 chat agy $AGY_ID "
 expect "a second session" has_line '^side 1\.1 chat fx FXB '
+WORK_SID=$(R ls --json | tr ',' '\n' | awk -F'"' '/session_id/{print $4; exit}')
+expect "durable save leaves zero attached session clients" \
+  test "$(R do --all -e "return #((rex.session.list_clients{ session_id = '$WORK_SID' } or {}).clients or {})")" = 0
 before=$listing
 CLAUDE_ID=$(printf '%s\n' "$listing" | awk '$1 == "work" && $2 == "2.1" { print $5 }')
 PI_ID=$(printf '%s\n' "$listing" | awk '$1 == "work" && $2 == "6.1" { print $5 }')
@@ -125,7 +139,6 @@ echo "2. Restart: Rex brings back the tabs, rex-durable the programs"
 stop_server
 expect "the fake chats stopped with the server" test "$(running "$T/bin/fx --resume FXA")" = 0
 start_server
-# Chats already open outside Rex (including agy!) must not be opened a second time.
 (cd "$T" && exec "$T/bin/fx" --resume FXC >/dev/null) &
 outside_pid=$!
 sleep 1
@@ -166,7 +179,7 @@ expect "no second pi" test "$(running "$T/bin/pi --model zhipu/glm-5.3 --thinkin
 expect "no second agy" test "$(running "$T/bin/agy --effort high --conversation $AGY_ID")" = 1
 expect "nothing typed the second time" sh -c "! grep -q ' type ' '$T/startup2.log'"
 
-echo "4. A server that starts empty: rex-durable rebuilds the sessions"
+echo "4. Empty server: rex-durable rebuilds sessions with rex.layout.*, labels, focus & zoom"
 stop_server
 start_server --restore=false
 expect "the new server starts with no sessions" \
@@ -179,26 +192,44 @@ expect "work session rebuilt with its fx chat" has_line '^work 1\.1 chat fx FXA 
 expect "codex split rebuilt" has_line "^work 1\.2 chat codex $CODEX_ID "
 expect "pi split rebuilt" has_line "^work 6\.1 chat pi $PI_ID "
 expect "agy split rebuilt" has_line "^work 6\.2 chat agy $AGY_ID "
+NEW_AGY_BLK=$(block "$listing" work 6.2)
+expect "custom block label preserved on rebuild" \
+  test "$(R do -s work -e "return rex.session.describe_block{ block_id = '$NEW_AGY_BLK' }.block.label")" = '"agy-agent"'
+expect "zoomed pane state preserved on rebuild" \
+  test "$(R do -s work -e 'return rex.session.view{}.windows[6].zoomed_block_id')" = "\"$NEW_AGY_BLK\""
+expect "focused pane preserved on rebuild" \
+  test "$(R do -s work -e 'return rex.session.view{}.windows[6].focused_block_id')" = "\"$NEW_AGY_BLK\""
 expect "side session rebuilt" has_line '^side 1\.1 chat fx FXB '
 expect "still only the outside FXC" test "$(running "$T/bin/fx --resume FXC")" = 1
 kill "$outside_pid" 2>/dev/null || true
 
-echo "5. The watcher, kept running like a login service, brings programs back by itself"
+echo "5. In-process event watcher reacts to terminal.process_changed & server restarts"
 touch "$T/supervise"
 (
   while [ -e "$T/supervise" ]; do
     env -u REX_SESSION -u REX_BLOCK -u REX_SERVER -u REX_CLIENT -u REX_CONFIG \
         -u PI_CODING_AGENT_DIR -u PI_CODING_AGENT_SESSION_DIR -u REX_DURABLE_STATE_DIR HOME="$H" \
-      "$REX" --autostart=false -S "$SOCK" do "$here/durable.lua" --all mode=watch "rex=$REX" \
-      "script=$here/durable.lua" "server=$SOCK" "state_dir=$T/durable" notify=false >>"$T/watch.log" 2>&1 &
+      "$REX" --autostart=false -S "$SOCK" do "$here/durable.lua" --all mode=watch \
+      "state_dir=$T/durable" notify=false >>"$T/watch.log" 2>&1 &
     echo $! >"$T/watch.pid"
     wait $! || true
     sleep 1
   done
 ) &
 watch_pid=$!
-sleep 4
-expect "watcher started" grep -q 'watching' "$T/watch.log"
+sleep 3
+expect "in-process watcher started" grep -q 'watching' "$T/watch.log"
+# Start a chat inside the plain shell tab (work 4.1) and verify terminal.process_changed
+# triggers an automatic in-process save within ~4s without waiting for the 30s poll!
+SHELL_BLK=$(block "$listing" work 4.1)
+R do -s work -e "rex.block.call('com.superlogical.terminal', 'write', \
+  { block_id = '$SHELL_BLK', data = \"'$T/bin/fx' --resume FX_LIVE\\n\" }) return 'ok'" >/dev/null
+for _ in $(seq 1 16); do
+  show | grep -q '^work 4\.1 chat fx FX_LIVE ' && break
+  sleep 0.5
+done
+expect "terminal.process_changed saved newly started chat in real time" \
+  sh -c "'$REX' --autostart=false -S '$SOCK' do '$here/test/e2e_show.lua' 'state_dir=$T/durable' | grep -q '^work 4\.1 chat fx FX_LIVE '"
 stop_server
 start_server
 for _ in $(seq 1 40); do
@@ -212,6 +243,7 @@ listing=$(show)
 expect "fx chat back in its tab" has_line '^work 1\.1 chat fx FXA '
 expect "codex chat back in its split" has_line "^work 1\.2 chat codex $CODEX_ID "
 expect "claude chat back" has_line "^work 2\.1 chat claude $CLAUDE_ID "
+expect "real-time FX_LIVE chat also reopened" has_line '^work 4\.1 chat fx FX_LIVE '
 expect "pi chat back" has_line "^work 6\.1 chat pi $PI_ID "
 expect "agy chat back" has_line "^work 6\.2 chat agy $AGY_ID "
 expect "side session's chat back" has_line '^side 1\.1 chat fx FXB '
@@ -219,10 +251,19 @@ expect "one copy of each chat" test "$(running "$T/bin/fx --resume FXA")" = 1
 rm -f "$T/supervise"
 stop_watcher
 
-echo "6. The command palette actions load"
-sed -e "s|@REX@|$REX|" -e "s|@SCRIPT@|$here/durable.lua|" "$here/rex_durable.lua" >"$T/rex_durable.lua"
-printf 'package.path = "%s/?.lua;" .. package.path\nrequire("rex_durable")\n' "$T" >"$T/check.lua"
-expect "rex config check passes" sh -c "'$REX' config check '$T/check.lua' >'$T/check.log' 2>&1"
+echo "6. First-class rex.action commands load, validate args, and return structured JSON"
+sed -e "s|@REX@|$REX|" -e "s|@SCRIPT@|$here/durable.lua|" \
+    -e "s|\"--autostart=false\"|\"--autostart=false\", \"-S\", \"$SOCK\"|" \
+    "$here/rex_durable.lua" >"$T/config/rex_durable.lua"
+printf 'require("rex_durable")\n' >"$T/config/init.lua"
+expect "rex config check passes" sh -c "'$REX' config check '$T/config/init.lua' >'$T/check.log' 2>&1"
+R config reload >/dev/null
+expect "rex do durable_status returns structured JSON" \
+  sh -c "'$REX' --autostart=false -S '$SOCK' do durable_status | grep -q '\"version\":\"0.4.0\"'"
+expect "rex do durable_status rejects undeclared arguments" \
+  sh -c "! '$REX' --autostart=false -S '$SOCK' do durable_status bogus=1 >/dev/null 2>&1"
+expect "rex do durable_reopen rejects undeclared arguments via Rex args schema" \
+  sh -c "! '$REX' --autostart=false -S '$SOCK' do durable_reopen bogus=1 >/dev/null 2>&1"
 
 echo "7. Subagents & many tabs closing at once while Rex keeps running"
 HOME="$H" R do "$here/test/e2e_more.lua" action=sub "bin=$T/bin" "dir=$T/my proj" >/dev/null

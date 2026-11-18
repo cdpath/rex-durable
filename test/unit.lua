@@ -151,6 +151,12 @@ check("pi --session path", { M.argv_session("pi", { "pi", "--session=" .. pi_fil
 check("claude via node", M.is_app("claude", "node", { "node", "/usr/local/bin/claude" }), true)
 check("pi via node", M.is_app("pi", "node", { "node", "/Users/me/.bun/bin/pi" }), true)
 check("pi via bun package", M.is_app("pi", "bun", { "bun", "/opt/pi-coding-agent/dist/cli.js" }), true)
+check("pi via Rex terminal.process script field",
+  M.is_app("pi", { name = "node", script = "/opt/pi-coding-agent/dist/cli.js" }, {}), true)
+check("pi via Rex terminal.process invoked_path field",
+  M.is_app("pi", { name = "node", invoked_path = "/Users/alice/.bun/bin/pi" }, {}), true)
+check("pi via Rex terminal.process argv0 field",
+  M.is_app("pi", { name = "node", argv0 = "pi" }, {}), true)
 check("pi binary", M.is_app("pi", "pi", { "pi" }), true)
 check("agy binary", M.is_app("agy", "agy", { "/Users/me/.local/bin/agy" }), true)
 check("codex binary", M.is_app("codex", "codex", { "/opt/homebrew/bin/codex" }), true)
