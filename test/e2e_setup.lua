@@ -23,6 +23,7 @@ assert(rex.call("session.create", { label = "work", initial_windows = {
   { layout = { split = { direction = "horizontal", ratio = 0.5,
     before = tab(q(bin .. "/pi") .. " --model zhipu/glm-5.3 --thinking max"),
     after = tab(q(bin .. "/agy") .. " --effort high --conversation 22222222-3333-4444-8555-666666666666") } } },
+  { layout = tab(q(bin .. "/droid") .. " resume --auto high") }, -- interactive droid resume, found via ~/.factory/sessions
 } }))
 assert(rex.call("session.create", { label = "side", initial_windows = {
   { layout = tab(q(bin .. "/fx") .. " --resume FXB") },

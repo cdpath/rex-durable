@@ -7,8 +7,10 @@
  *   claude  writes FAKE_HOME/.claude/projects/<folder>/<id>.jsonl and closes it
  *   pi      writes FAKE_HOME/.pi/agent/sessions/--<slug>--/..._<id>.jsonl and closes it
  *   agy     holds FAKE_HOME/.gemini/antigravity-cli/brain/<id> directory open
+ *   droid   writes FAKE_HOME/.factory/sessions/<folder>/<id>.jsonl and closes it;
+ *           with --child <id> it then adds that Task subagent's session next to it
  *
- * Built by test/e2e.sh with -DAPP="fx" (or claude, codex, pi, agy) and -DFAKE_HOME.
+ * Built by test/e2e.sh with -DAPP="fx" (or claude, codex, pi, agy, droid) and -DFAKE_HOME.
  */
 #include <ctype.h>
 #include <fcntl.h>
@@ -54,6 +56,17 @@ static void make_pi_slug(const char *cwd, char *out, size_t out_sz) {
   snprintf(out, out_sz, "--%s--", mid);
 }
 
+static void make_droid_slug(const char *cwd, char *out, size_t out_sz) {
+  size_t len = strlen(cwd);
+  while (len > 0 && (cwd[len - 1] == '/' || cwd[len - 1] == '\\')) len--;
+  size_t j = 0;
+  for (size_t i = 0; i < len && j + 1 < out_sz; i++) {
+    char c = cwd[i];
+    out[j++] = (c == '/' || c == '\\' || c == ':') ? '-' : c;
+  }
+  out[j] = 0;
+}
+
 int main(int argc, char **argv) {
   const char *app = APP;
   char id[128] = "", child[128] = "";
@@ -69,7 +82,7 @@ int main(int argc, char **argv) {
     if ((!strcmp(argv[i], "--resume") || !strcmp(argv[i], "-r") || !strcmp(argv[i], "resume") ||
          !strcmp(argv[i], "--session") || !strcmp(argv[i], "--session-id") ||
          !strcmp(argv[i], "--conversation") || !strcmp(argv[i], "--switch")) &&
-        i + 1 < argc)
+        i + 1 < argc && argv[i + 1][0] != '-')
       snprintf(id, sizeof id, "%s", argv[++i]);
   }
   if (!id[0]) {
@@ -133,6 +146,12 @@ int main(int argc, char **argv) {
     snprintf(dir, sizeof dir, "%s/.pi/agent/sessions/%s", FAKE_HOME, slug);
     snprintf(file, sizeof file, "%s/2026-11-18T10-00-00-000Z_%s.jsonl", dir, id);
     keep_open = 0;
+  } else if (!strcmp(app, "droid")) {
+    char slug[2200];
+    make_droid_slug(cwd, slug, sizeof slug);
+    snprintf(dir, sizeof dir, "%s/.factory/sessions/%s", FAKE_HOME, slug);
+    snprintf(file, sizeof file, "%s/%s.jsonl", dir, id);
+    keep_open = 0;
   } else {
     char slug[2048];
     snprintf(slug, sizeof slug, "%s", cwd);
@@ -153,12 +172,26 @@ int main(int argc, char **argv) {
   if (!strcmp(app, "pi")) {
     n = snprintf(line, sizeof line,
                  "{\"type\":\"session\",\"version\":3,\"id\":\"%s\",\"cwd\":\"%s\"}\n", id, cwd);
+  } else if (!strcmp(app, "droid")) {
+    n = snprintf(line, sizeof line,
+                 "{\"type\":\"session_start\",\"version\":2,\"id\":\"%s\",\"cwd\":\"%s\"}\n", id, cwd);
   } else {
     n = snprintf(line, sizeof line,
                  "{\"type\":\"session_meta\",\"payload\":{\"id\":\"%s\",\"cwd\":\"%s\"}}\n", id, cwd);
   }
   if (write(fd, line, (size_t)n) != n) return 1;
   if (!keep_open) close(fd);
+  if (!strcmp(app, "droid") && child[0]) {
+    /* A Task subagent's session starts later and sits next to its parent's file. */
+    sleep(1);
+    char cfile[4608], cline[4096];
+    snprintf(cfile, sizeof cfile, "%s/%s.jsonl", dir, child);
+    snprintf(cline, sizeof cline,
+             "{\"type\":\"session_start\",\"version\":2,\"id\":\"%s\",\"callingSessionId\":\"%s\","
+             "\"callingToolUseId\":\"call_fake_0\",\"cwd\":\"%s\"}\n",
+             child, id, cwd);
+    write_new(cfile, cline);
+  }
   printf("fake %s on %s\n", app, id);
   fflush(stdout);
   for (;;) pause();

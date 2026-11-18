@@ -1,5 +1,5 @@
 -- More end-to-end helpers for test/e2e.sh, on the throwaway Rex server only:
---   action=sub bin=DIR dir=DIR   sessions with fx and agy chats running subagents
+--   action=sub bin=DIR dir=DIR   sessions with fx, agy, and droid chats running subagents
 --   action=close label=NAME      close every tab of one session, as if killed
 
 local a = rex.args
@@ -16,6 +16,11 @@ if a.action == "sub" then
       options = { cwd = a.dir, initial_input = q(a.bin .. "/agy")
         .. " --conversation 77777777-8888-4999-8000-aaaaaaaaaaaa"
         .. " --child 88888888-9999-4000-8111-bbbbbbbbbbbb\n" },
+    } } },
+    { layout = { block = {
+      flavor = "com.superlogical.terminal.shell",
+      options = { cwd = a.dir .. "/sub-droid", initial_input = q(a.bin .. "/droid")
+        .. " --child 5ea1ed00-0000-4000-8000-000000000001\n" },
     } } },
   } }))
 elseif a.action == "close" then

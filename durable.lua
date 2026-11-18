@@ -17,16 +17,17 @@ Built with Rex native best practices:
 Supported coding agents (auto-resumed on their exact conversation):
   * Antigravity CLI (`agy --conversation <id>`)
   * Pi coding agent (`pi --session <id>`)
+  * Factory Droid (`droid --resume <id>`)
   * Claude Code (`claude --resume <id>`)
   * Codex (`codex resume <id>`)
   * fx (`fx --resume <id>`)
 
 MIT License — based on https://github.com/fazxes/rex-durable, redesigned for
-idiomatic Rex APIs with Pi and Antigravity CLI support.
+idiomatic Rex APIs with Pi, Antigravity CLI, and Factory Droid support.
 ]]
 
 local M = {}
-M.VERSION = "0.4.0"
+M.VERSION = "0.5.0"
 
 local TERMINAL = "com.superlogical.terminal"
 local SHELL_FLAVOR = "com.superlogical.terminal.shell"
@@ -50,7 +51,7 @@ local SHELLS = {
   nu = true, sh = true, tcsh = true, xonsh = true, zsh = true,
 }
 
-M.APPS = { "fx", "claude", "codex", "pi", "agy" }
+M.APPS = { "fx", "claude", "codex", "pi", "agy", "droid" }
 
 -- Options each chat program keeps when it reopens. Anything else on the
 -- original command line, such as an internal relaunch flag or old resume ID,
@@ -98,6 +99,12 @@ M.CHATS = {
                ["--log-file"] = true },
     switches = { ["--dangerously-skip-permissions"] = true, ["--sandbox"] = true,
                  ["--remote-agent"] = true, ["--remote-control"] = true },
+  },
+  droid = {
+    values = { ["--settings"] = true, ["--append-system-prompt"] = true,
+               ["--append-system-prompt-file"] = true, ["--cwd"] = true,
+               ["-w"] = true, ["--worktree"] = true, ["--auto"] = true },
+    switches = { ["--use-spec"] = true, ["--disable-builtin-skills"] = true },
   },
 }
 
@@ -509,6 +516,33 @@ function M.pi_session(files, home)
   end
 end
 
+-- Factory Droid writes ~/.factory/sessions/<cwd with / \ : as ->/<id>.jsonl
+-- (plus <id>.settings.json).
+function M.droid_slug(cwd)
+  return (tostring(cwd or ""):gsub("[/\\]+$", ""):gsub("[/\\:]", "-"))
+end
+
+-- A Task subagent's session sits beside its parent's in the same folder and
+-- names the parent in callingSessionId. Only the parent belongs to a tab.
+function M.droid_is_subagent(header)
+  return type(header) == "table" and type(header.callingSessionId) == "string"
+    and header.callingSessionId ~= ""
+end
+
+function M.droid_session(files, home)
+  local base = (home or HOME) .. "/.factory/sessions/"
+  for _, f in ipairs(list(files)) do
+    if under(f, base) then
+      local id = f:match("/(" .. UUID .. ")%.jsonl$")
+        or f:match("/(" .. UUID .. ")%.settings%.json$")
+      if id then
+        local jsonl = f:gsub("%.settings%.json$", ".jsonl")
+        return id, jsonl
+      end
+    end
+  end
+end
+
 -- Antigravity CLI (agy) holds ~/.gemini/antigravity-cli/conversations/<id>.db*
 -- and ~/.gemini/antigravity-cli/brain/<id> open while the conversation runs.
 -- Subagent conversations are filtered out via parent transcript.jsonl references.
@@ -557,18 +591,24 @@ end
 
 function M.argv_session(app, argv)
   argv = list(argv)
-  for i = 1, #argv - 1 do
-    local a, b = argv[i], argv[i + 1]
+  local saw_resume_subcmd = false
+  for i = 1, #argv do
+    local a = argv[i]
+    local b = argv[i + 1]
     if a == "--" then break end
-    if app == "codex" and a == "resume" and b:match("^" .. UUID .. "$") then
-      return b
-    elseif app == "claude" and (a == "--resume" or a == "-r" or a == "--session-id")
-      and b:match("^" .. UUID .. "$") then
+    if (app == "codex" or app == "droid") and a == "resume" then
+      saw_resume_subcmd = true
+      if b and b:match("^" .. UUID .. "$") then return b end
+    elseif saw_resume_subcmd and a:match("^" .. UUID .. "$") then
+      return a
+    elseif (app == "claude" or app == "droid")
+      and (a == "--resume" or a == "-r" or a == "--session-id")
+      and b and b:match("^" .. UUID .. "$") then
       return b
     elseif app == "agy" and (a == "--conversation" or a == "--switch")
-      and b:match("^" .. UUID .. "$") then
+      and b and b:match("^" .. UUID .. "$") then
       return b
-    elseif app == "pi" then
+    elseif app == "pi" and b then
       if a == "--session-id" and b:match("^" .. UUID .. "$") then return b end
       if a == "--session" then
         local id, file = parse_pi_session_arg(b)
@@ -578,8 +618,9 @@ function M.argv_session(app, argv)
   end
   for _, a in ipairs(argv) do
     if a == "--" then break end
-    if app == "claude" then
+    if app == "claude" or app == "droid" then
       local id = a:match("^%-%-resume=(" .. UUID .. ")$")
+        or a:match("^%-r=(" .. UUID .. ")$")
         or a:match("^%-%-session%-id=(" .. UUID .. ")$")
       if id then return id end
     elseif app == "agy" then
@@ -631,7 +672,7 @@ local function chat_in(p, info, block_id)
   local argv = argv_of(p.pid, info.ps[p.pid])
   local id, store = M.fx_session(files)
   if id then return { kind = "chat", app = "fx", id = id, store = store, argv = argv } end
-  for _, app in ipairs({ "claude", "codex", "pi", "agy" }) do
+  for _, app in ipairs({ "claude", "codex", "pi", "agy", "droid" }) do
     if M.is_app(app, p, argv) then
       local rec = M.block_record(block_id, p.pid, app, info.state_dir)
       if rec then
@@ -654,6 +695,8 @@ local function chat_in(p, info, block_id)
         found, file = M.pi_session(files)
       elseif app == "agy" then
         found, file = M.agy_session(files)
+      elseif app == "droid" then
+        found, file = M.droid_session(files)
       end
       if not found then
         local argv_id, argv_file = M.argv_session(app, argv)
@@ -702,6 +745,12 @@ local function pi_header(path)
   if ok and type(meta) == "table" and meta.type == "session" then return meta end
 end
 
+local function droid_header(path)
+  local line = first_line(path)
+  local ok, meta = pcall(function() return line and rex.json.decode(line) end)
+  if ok and type(meta) == "table" and meta.type == "session_start" then return meta end
+end
+
 local function newest_session_file(pane, info)
   if pane.app == "agy" then return nil end
   local age = (info.ps[pane.pid] or {}).age or 0
@@ -713,6 +762,14 @@ local function newest_session_file(pane, info)
     for _, path in ipairs(list_dir(pi_sessions_root() .. "/" .. M.pi_slug(pane.cwd), ".jsonl")) do
       local header = pi_header(path)
       if not header or not header.cwd or header.cwd == pane.cwd then
+        candidates[#candidates + 1] = path
+      end
+    end
+  elseif pane.app == "droid" then
+    local sdir = HOME .. "/.factory/sessions/" .. M.droid_slug(pane.cwd)
+    for _, path in ipairs(list_dir(sdir, ".jsonl")) do
+      local header = droid_header(path)
+      if not M.droid_is_subagent(header) and (not header or not header.cwd or header.cwd == pane.cwd) then
         candidates[#candidates + 1] = path
       end
     end
@@ -729,6 +786,12 @@ local function newest_session_file(pane, info)
   end
   if not best then return nil end
   if pane.app == "claude" then return best:match("/(" .. UUID .. ")%.jsonl$"), best end
+  if pane.app == "droid" then
+    local header = droid_header(best)
+    local id = (header and type(header.id) == "string" and header.id ~= "" and header.id)
+      or best:match("/(" .. UUID .. ")%.jsonl$")
+    return id, best
+  end
   if pane.app == "pi" then
     local header = pi_header(best)
     local id = (header and type(header.id) == "string" and header.id ~= "" and header.id)
@@ -1137,7 +1200,7 @@ function M.resume_argv(pane, accepts)
       argv[#argv + 1] = "--sessions-v2"
     end
     argv[#argv + 1] = "--resume"
-  elseif pane.app == "claude" then
+  elseif pane.app == "claude" or pane.app == "droid" then
     argv[#argv + 1] = "--resume"
   elseif pane.app == "pi" then
     argv[#argv + 1] = "--session"
@@ -1178,7 +1241,7 @@ local function open_chats(saved, live)
           elseif p.app == "agy" then
             path = path or (HOME .. "/.gemini/antigravity-cli/brain/" .. p.id)
           end
-          if path and p.app ~= "claude" and p.app ~= "pi" then
+          if path and p.app ~= "claude" and p.app ~= "pi" and p.app ~= "droid" then
             paths[#paths + 1] = path
             owner[path] = p.app .. ":" .. p.id
           end

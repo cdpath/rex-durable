@@ -92,9 +92,10 @@ expect() {
 }
 running() { pgrep -f -x "$1" | wc -l | tr -d ' '; }
 has_line() { printf '%s\n' "$listing" | grep -E -q -- "$1"; }
+lacks_line() { ! has_line "$1"; }
 block() { printf '%s\n' "$1" | awk -v s="$2" -v tab="$3" '$1 == s && $2 == tab { print $NF }'; }
 
-for app in fx claude codex pi agy; do
+for app in fx claude codex pi agy droid; do
   cc -O0 -o "$T/bin/$app" -DAPP="\"$app\"" -DFAKE_HOME="\"$H\"" "$here/test/fake.c"
 done
 CODEX_ID=11111111-2222-4333-8444-555555555555
@@ -103,6 +104,7 @@ AGY_ID=22222222-3333-4444-8555-666666666666
 echo "0. Unit tests"
 start_server
 if (cd / && R do "$here/test/unit.lua" "root=$here") >"$T/unit.log" 2>&1; then ok "$(tail -1 "$T/unit.log")"; else cat "$T/unit.log"; bad "unit tests"; fi
+if "$here/test/hook.sh" >"$T/hook.log" 2>&1; then ok "SessionStart hook: $(tail -1 "$T/hook.log")"; else cat "$T/hook.log"; bad "SessionStart hook tests"; fi
 if [ "${1:-}" = "--unit" ]; then echo; echo "$passed passed, $failed failed"; [ "$failed" = 0 ]; exit; fi
 
 echo "1. Save what runs in each tab (including custom labels, focus & zoom)"
@@ -127,6 +129,7 @@ expect "another program and its command" has_line '^work 3\.1 program - sleep 42
 expect "a plain shell" has_line '^work 4\.1 shell '
 expect "new pi chat from its newest session file" has_line '^work 6\.1 chat pi 00000000-0000-4000-8000-'
 expect "agy chat from its open brain directory" has_line "^work 6\.2 chat agy $AGY_ID "
+expect "droid interactive resume resolved from ~/.factory/sessions" has_line '^work 7\.1 chat droid 00000000-0000-4000-8000-'
 expect "a second session" has_line '^side 1\.1 chat fx FXB '
 WORK_SID=$(R ls --json | tr ',' '\n' | awk -F'"' '/session_id/{print $4; exit}')
 expect "durable save leaves zero attached session clients" \
@@ -134,6 +137,7 @@ expect "durable save leaves zero attached session clients" \
 before=$listing
 CLAUDE_ID=$(printf '%s\n' "$listing" | awk '$1 == "work" && $2 == "2.1" { print $5 }')
 PI_ID=$(printf '%s\n' "$listing" | awk '$1 == "work" && $2 == "6.1" { print $5 }')
+DROID_ID=$(printf '%s\n' "$listing" | awk '$1 == "work" && $2 == "7.1" { print $5 }')
 
 echo "2. Restart: Rex brings back the tabs, rex-durable the programs"
 stop_server
@@ -161,6 +165,9 @@ expect "pi chat saved in the same split pane" has_line "^work 6\.1 chat pi $PI_I
 expect "agy chat reopened on its conversation with kept flags" \
   test "$(running "$T/bin/agy --effort high --conversation $AGY_ID")" = 1
 expect "agy chat saved in the same split pane" has_line "^work 6\.2 chat agy $AGY_ID "
+expect "droid chat reopened with --resume and kept --auto flag" \
+  test "$(running "$T/bin/droid --auto high --resume $DROID_ID")" = 1
+expect "droid chat saved in its tab" has_line "^work 7\.1 chat droid $DROID_ID "
 expect "a busy tab was waited for" grep -q 'trying again' "$T/startup.log"
 expect "second session's chat reopened once its tab was free" has_line '^side 1\.1 chat fx FXB '
 expect "program typed, not run" test "$(running "sleep 4242")" = 0
@@ -259,13 +266,14 @@ printf 'require("rex_durable")\n' >"$T/config/init.lua"
 expect "rex config check passes" sh -c "'$REX' config check '$T/config/init.lua' >'$T/check.log' 2>&1"
 R config reload >/dev/null
 expect "rex do durable_status returns structured JSON" \
-  sh -c "'$REX' --autostart=false -S '$SOCK' do durable_status | grep -q '\"version\":\"0.4.0\"'"
+  sh -c "'$REX' --autostart=false -S '$SOCK' do durable_status | grep -q '\"version\":\"0.5.0\"'"
 expect "rex do durable_status rejects undeclared arguments" \
   sh -c "! '$REX' --autostart=false -S '$SOCK' do durable_status bogus=1 >/dev/null 2>&1"
 expect "rex do durable_reopen rejects undeclared arguments via Rex args schema" \
   sh -c "! '$REX' --autostart=false -S '$SOCK' do durable_reopen bogus=1 >/dev/null 2>&1"
 
 echo "7. Subagents & many tabs closing at once while Rex keeps running"
+mkdir -p "$T/my proj/sub-droid"
 HOME="$H" R do "$here/test/e2e_more.lua" action=sub "bin=$T/bin" "dir=$T/my proj" >/dev/null
 sleep 2
 D mode=save
@@ -273,6 +281,10 @@ listing=$(show)
 expect "fx chat running a subagent is saved as the main chat" has_line '^sub 1\.1 chat fx FXP '
 expect "agy chat running a subagent is saved as the main chat" \
   has_line '^sub 2\.1 chat agy 77777777-8888-4999-8000-aaaaaaaaaaaa '
+expect "droid chat running a Task subagent is saved as the main chat" \
+  has_line '^sub 3\.1 chat droid 00000000-0000-4000-8000-'
+expect "droid Task subagent's newer session is not taken for the chat" \
+  lacks_line '^sub 3\.1 chat droid 5ea1ed00-'
 before_panes=$(printf '%s\n' "$listing" | grep -c '^work ')
 HOME="$H" R do "$here/test/e2e_more.lua" action=close label=work >/dev/null
 sleep 2

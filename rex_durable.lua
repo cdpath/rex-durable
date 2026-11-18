@@ -100,9 +100,9 @@ rex.action{
 rex.action{
   name        = "durable_reopen",
   title       = "Durable: Reopen Programs in Their Tabs",
-  description = "Resume saved coding agent chats (agy, pi, claude, codex, fx) and stage other commands in restored idle tabs.",
+  description = "Resume saved coding agent chats (agy, pi, droid, claude, codex, fx) and stage other commands in restored idle tabs.",
   category    = CATEGORY,
-  keywords    = "durable restore resume reopen programs chats sessions fx claude codex pi agy antigravity",
+  keywords    = "durable restore resume reopen programs chats sessions fx claude codex pi agy antigravity droid factory",
   args        = { dry_run = "boolean?", from = "string?", programs = "boolean?" },
   run         = function(ctx, a)
     local keys = { "dry_run", "from", "programs" }

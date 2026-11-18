@@ -8,6 +8,7 @@ Rex saves your sessions, windows (tabs), and splits when its server stops, and r
 | --- | --- |
 | **Antigravity CLI (`agy`)** | Resumes exact conversation: `agy --conversation <id>` |
 | **Pi coding agent (`pi`)** | Resumes exact conversation: `pi --session <id>` (+ native `OSC 7501` tab status!) |
+| **Factory Droid (`droid`)** | Resumes exact conversation: `droid --resume <id>` |
 | **Claude Code (`claude`)** | Resumes exact conversation: `claude --resume <id>` |
 | **Codex (`codex`)** | Resumes exact conversation: `codex resume <id>` |
 | **[fx](https://fx.sh) (`fx`)** | Resumes exact conversation: `fx --resume <id>` |
@@ -26,6 +27,7 @@ Unlike polling/shell-heavy approaches, `rex-durable` is designed specifically ar
 - **Full layout fidelity via `rex.layout.*`**: Rebuilds splits with `rex.layout.horizontal` / `rex.layout.vertical` / `rex.layout.block`, preserving window focus (`w.focused_block_id`), zoomed panes (`w.zoomed_block_id`), and custom block labels (`b.label`).
 - **First-class `rex.action` commands**: Registers typed actions (`durable_status`, `durable_save`, `durable_reopen`, `durable_repair`, `durable_checkpoint`, `durable_rebuild`) with `args` validation schemas—callable from the Command Palette, keybindings (`rex.bind`), or directly via `rex do <action> [--json]`.
 - **Native `OSC 7501` Program Status for Pi**: Since Rex doesn't yet ship a built-in hook for Pi, `extensions/rex-durable.ts` both tracks `REX_BLOCK` $\rightarrow$ `sessionId` + `process.argv` and emits spec-compliant `OSC 7501` (`app=pi`: `idle`, `working`, `blocked`, `done`) so Pi gets native Rex tab spinners and session-picker badges.
+- **`SessionStart` hook for Claude Code and Droid**: `install.sh` registers `hooks/rex-durable-hook.sh` in `~/.claude/settings.json` and `~/.factory/settings.json`. Inside a Rex pane the hook records which session each block runs, so two agents in one folder resume on their own sessions. Outside Rex it does nothing, and it ignores Droid Task subagent sessions. Pass `--no-hooks` to skip it. `uninstall.sh` removes it. Without the hook, `rex-durable` picks the newest main session file in the folder.
 
 ## Install
 

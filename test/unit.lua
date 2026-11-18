@@ -73,6 +73,25 @@ local pi_id = "01a1ed70-0f42-7352-8e29-dca044c16b6d"
 local pi_file = HOME .. "/.pi/agent/sessions/--Users-me-proj--/2026-11-18T06-55-06-562Z_" .. pi_id .. ".jsonl"
 check("pi open session file", { M.pi_session({ pi_file }, HOME) }, { pi_id, pi_file })
 
+-- Factory Droid slug & session detection
+local droid_id = "eeeeeeee-5555-4555-8555-eeeeeeeeeeee"
+local droid_file = HOME .. "/.factory/sessions/-Users-alice-Developer-rex-durable/" .. droid_id .. ".jsonl"
+local droid_settings = HOME .. "/.factory/sessions/-Users-alice-Developer-rex-durable/" .. droid_id .. ".settings.json"
+check("droid slug normal path", M.droid_slug("/Users/alice/Developer/rex-durable"),
+  "-Users-alice-Developer-rex-durable")
+check("droid slug keeps dots, underscores, spaces",
+  M.droid_slug("/Users/alice/.herdr/my_proj/my docs/"),
+  "-Users-alice-.herdr-my_proj-my docs")
+check("droid open jsonl file", { M.droid_session({ droid_file }, HOME) }, { droid_id, droid_file })
+check("droid open settings.json maps to jsonl",
+  { M.droid_session({ droid_settings }, HOME) }, { droid_id, droid_file })
+check("droid session started by a Task is a subagent's",
+  M.droid_is_subagent({ type = "session_start", id = "w", callingSessionId = droid_id }), true)
+check("droid session with no calling session is a main session",
+  M.droid_is_subagent({ type = "session_start", id = droid_id }), false)
+check("droid empty calling session is a main session", M.droid_is_subagent({ callingSessionId = "" }), false)
+check("droid unreadable header is not taken for a subagent's", M.droid_is_subagent(nil), false)
+
 -- Many tabs closed at once
 local function snap_with(tabs, chats)
   local windows = {}
@@ -141,7 +160,12 @@ local uuid = "cccccccc-4444-4555-8666-dddddddddddd"
 check("claude --resume", M.argv_session("claude", { "claude", "--resume", uuid }), uuid)
 check("claude --resume=", M.argv_session("claude", { "claude", "--resume=" .. uuid }), uuid)
 check("codex resume", M.argv_session("codex", { "codex", "resume", uuid }), uuid)
+check("codex resume with flags before id", M.argv_session("codex", { "codex", "resume", "-m", "gpt-5", uuid }), uuid)
 check("codex --last", M.argv_session("codex", { "codex", "resume", "--last" }), nil)
+check("droid --resume", M.argv_session("droid", { "droid", "--resume", droid_id }), droid_id)
+check("droid -r", M.argv_session("droid", { "droid", "-r", droid_id }), droid_id)
+check("droid resume subcommand with flags", M.argv_session("droid", { "droid", "resume", "--auto", "high", droid_id }), droid_id)
+check("droid interactive resume without id", M.argv_session("droid", { "droid", "resume" }), nil)
 check("agy --conversation", M.argv_session("agy", { "agy", "--conversation", agy_main }), agy_main)
 check("agy --conversation=", M.argv_session("agy", { "agy", "--conversation=" .. agy_main }), agy_main)
 check("agy --switch", M.argv_session("agy", { "agy", "--switch", agy_main }), agy_main)
@@ -200,6 +224,10 @@ check("agy resume keeps model, effort, mode, sandbox",
   cmd({ app = "agy", id = agy_main,
         argv = { "agy", "-c", "--model", "gemini-4", "--effort", "high", "--mode", "auto", "--sandbox" } }),
   "agy --model gemini-4 --effort high --mode auto --sandbox --conversation " .. agy_main)
+check("droid resume keeps --auto and --use-spec, drops bare resume subcmd",
+  cmd({ app = "droid", id = droid_id,
+        argv = { "droid", "resume", "--auto", "high", "--use-spec" } }),
+  "droid --auto high --use-spec --resume " .. droid_id)
 check("quote spaces", M.join({ "cd", "/a b/it's" }), "cd '/a b/it'\\''s'")
 
 -- Block record from Pi extension (verified by PID, recovers flags hidden by process.title)

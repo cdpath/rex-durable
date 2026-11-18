@@ -41,8 +41,53 @@ else
   fi
 fi
 
-rm -f "$data/durable.lua" "$config/rex_durable.lua" "$pi_agent_dir/extensions/rex-durable.ts"
-rm -rf "$HOME/.agents/skills/rex-durable" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/rex-durable"
+if command -v python3 >/dev/null 2>&1; then
+  CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" FACTORY_DIR="$HOME/.factory" python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+import shutil
+
+for settings_path in [
+    os.path.join(os.environ["CLAUDE_DIR"], "settings.json"),
+    os.path.join(os.environ["FACTORY_DIR"], "settings.json"),
+]:
+    if not os.path.isfile(settings_path):
+        continue
+    with open(settings_path, encoding="utf-8") as f:
+        data = json.load(f)
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    session_start = hooks.get("SessionStart") if isinstance(hooks, dict) else None
+    if not isinstance(session_start, list):
+        continue
+    cleaned = []
+    changed = False
+    for entry in session_start:
+        if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+            cleaned.append(entry)
+            continue
+        kept = [
+            h for h in entry["hooks"]
+            if not (isinstance(h, dict) and "rex-durable-hook.sh" in str(h.get("command", "")))
+        ]
+        if len(kept) != len(entry["hooks"]):
+            changed = True
+        if kept:
+            new_entry = dict(entry)
+            new_entry["hooks"] = kept
+            cleaned.append(new_entry)
+    if changed:
+        hooks["SessionStart"] = cleaned
+        tmp = settings_path + ".rex-durable.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        shutil.copymode(settings_path, tmp)
+        os.replace(tmp, settings_path)
+PY
+fi
+
+rm -f "$data/durable.lua" "$data/rex-durable-hook.sh" "$config/rex_durable.lua" "$pi_agent_dir/extensions/rex-durable.ts"
+rm -rf "$HOME/.agents/skills/rex-durable" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/rex-durable" "$HOME/.factory/skills/rex-durable"
 
 if [ "$purge" = 1 ]; then
   rm -rf "$data" "$state"

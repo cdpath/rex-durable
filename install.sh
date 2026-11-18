@@ -1,12 +1,13 @@
 #!/bin/sh
-# Install rex-durable: copy durable.lua, install the Pi extension + agent skill,
-# load custom actions in ~/.config/rex/init.lua, and run the in-process event
-# watcher as a login service.
+# Install rex-durable: copy durable.lua, install Pi extension + Claude/Droid
+# SessionStart hooks + agent skill, load custom actions in ~/.config/rex/init.lua,
+# and run the in-process event watcher as a login service.
 #
 #   ./install.sh                    install, or update an existing install
 #   ./install.sh --add-to-config    also load custom actions from init.lua
 #   ./install.sh --no-service       copy files only; run durable.lua yourself
 #   ./install.sh --no-pi-extension  skip installing ~/.pi/agent/extensions/rex-durable.ts
+#   ./install.sh --no-hooks         skip installing Claude/Droid SessionStart hooks
 #   ./install.sh --no-skill         skip installing ~/.agents/skills/rex-durable
 #   REX=/path/to/rex ./install.sh   use this rex command
 #
@@ -23,14 +24,16 @@ os=$(uname -s)
 add_to_config=0
 service=1
 pi_ext=1
+install_hooks=1
 install_skill=1
 for arg in "$@"; do
   case "$arg" in
     --add-to-config) add_to_config=1 ;;
     --no-service) service=0 ;;
     --no-pi-extension) pi_ext=0 ;;
+    --no-hooks) install_hooks=0 ;;
     --no-skill) install_skill=0 ;;
-    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "install.sh: unknown option $arg" >&2; exit 2 ;;
   esac
 done
@@ -53,6 +56,7 @@ case "$os" in
 esac
 config="${XDG_CONFIG_HOME:-$HOME/.config}/rex"
 script="$data/durable.lua"
+hook_script="$data/rex-durable-hook.sh"
 
 find_rex() {
   if [ -n "${REX:-}" ]; then printf '%s\n' "$REX"; return 0; fi
@@ -96,17 +100,94 @@ if [ "$pi_ext" = 1 ]; then
   say "Installed Pi extension (session tracking + OSC 7501 status) in $ext_dst"
 fi
 
-if [ "$install_skill" = 1 ] && [ -f "$here/skills/rex-durable/SKILL.md" ]; then
-  for skill_root in "$HOME/.agents/skills" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills"; do
-    mkdir -p "$skill_root/rex-durable"
-    cp "$here/skills/rex-durable/SKILL.md" "$skill_root/rex-durable/SKILL.md.new"
-    mv "$skill_root/rex-durable/SKILL.md.new" "$skill_root/rex-durable/SKILL.md"
-  done
-  say "Installed agent skill in ~/.agents/skills/rex-durable and ~/.claude/skills/rex-durable"
+if [ "$install_hooks" = 1 ] && [ -f "$here/hooks/rex-durable-hook.sh" ]; then
+  sed -e "s|@STATE_DIR@|$(sed_text "$state")|" \
+      "$here/hooks/rex-durable-hook.sh" >"$hook_script.new"
+  chmod +x "$hook_script.new"
+  mv "$hook_script.new" "$hook_script"
+  if command -v python3 >/dev/null 2>&1; then
+    HOOK_SCRIPT="$hook_script" CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" FACTORY_DIR="$HOME/.factory" python3 - <<'PY'
+import json
+import os
+import shutil
+
+hook_script = os.environ["HOOK_SCRIPT"]
+targets = [
+    ("claude", os.path.join(os.environ["CLAUDE_DIR"], "settings.json")),
+    ("droid", os.path.join(os.environ["FACTORY_DIR"], "settings.json")),
+]
+
+for app, settings_path in targets:
+    parent = os.path.dirname(settings_path)
+    if not os.path.isdir(parent):
+        continue
+    data = {}
+    if os.path.isfile(settings_path):
+        try:
+            with open(settings_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+    if not isinstance(data, dict):
+        continue
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        continue
+    session_start = hooks.setdefault("SessionStart", [])
+    if not isinstance(session_start, list):
+        continue
+
+    cmd = f"sh '{hook_script}' {app}"
+    cleaned = []
+    for entry in session_start:
+        if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+            cleaned.append(entry)
+            continue
+        kept = [
+            h for h in entry["hooks"]
+            if not (isinstance(h, dict) and "rex-durable-hook.sh" in str(h.get("command", "")))
+        ]
+        if kept:
+            new_entry = dict(entry)
+            new_entry["hooks"] = kept
+            cleaned.append(new_entry)
+
+    cleaned.append({
+        "hooks": [
+            {
+                "type": "command",
+                "command": cmd,
+                "timeout": 5,
+            }
+        ]
+    })
+    hooks["SessionStart"] = cleaned
+
+    tmp = settings_path + ".rex-durable.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    if os.path.isfile(settings_path):
+        shutil.copymode(settings_path, tmp)
+    os.replace(tmp, settings_path)
+    print(f"Registered SessionStart hook for {app} in {settings_path}")
+PY
+  fi
 fi
 
-service_path="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.gemini/antigravity-cli/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-for tool in fx claude codex pi agy node bun; do
+if [ "$install_skill" = 1 ] && [ -f "$here/skills/rex-durable/SKILL.md" ]; then
+  for skill_root in "$HOME/.agents/skills" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills" "$HOME/.factory/skills"; do
+    if [ -d "$(dirname "$skill_root")" ]; then
+      mkdir -p "$skill_root/rex-durable"
+      cp "$here/skills/rex-durable/SKILL.md" "$skill_root/rex-durable/SKILL.md.new"
+      mv "$skill_root/rex-durable/SKILL.md.new" "$skill_root/rex-durable/SKILL.md"
+    fi
+  done
+  say "Installed agent skill rex-durable"
+fi
+
+service_path="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.factory/bin:$HOME/.gemini/antigravity-cli/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+for tool in fx claude codex pi agy droid node bun; do
   where=$(command -v "$tool" 2>/dev/null || true)
   case "$where" in
     /*)
