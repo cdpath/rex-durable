@@ -1,11 +1,11 @@
 ---
 name: rex-durable
-description: Inspect, checkpoint, reopen, or repair persistent agent sessions (agy, pi, droid, claude, codex, fx) across Rex server restarts using rex-durable custom actions.
+description: Inspect, checkpoint, reopen, or repair persistent agent sessions (agy, pi, droid, cursor-agent, claude, codex, fx) across Rex server restarts using rex-durable custom actions.
 ---
 
 # rex-durable
 
-`rex-durable` runs as a background Rex event watcher (`rex do ... --all`) and registers first-class custom actions in `~/.config/rex/init.lua`. It automatically snapshots active coding agent conversations (`agy`, `pi`, `droid`, `claude`, `codex`, `fx`) and restores them in their original tabs/splits after a Rex server restart or reboot.
+`rex-durable` runs as a background Rex event watcher (`rex do ... --all`) and registers first-class custom actions in `~/.config/rex/init.lua`. It automatically snapshots active coding agent conversations (`agy`, `pi`, `droid`, `cursor-agent` / `agent`, `claude`, `codex`, `fx`) and restores them in their original tabs/splits after a Rex server restart or reboot.
 
 ## Commands
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install rex-durable: copy durable.lua, install Pi extension + Claude/Droid
+# Install rex-durable: copy durable.lua, install Pi extension + Claude/Droid/Cursor
 # SessionStart hooks + agent skill, load custom actions in ~/.config/rex/init.lua,
 # and run the in-process event watcher as a login service.
 #
@@ -7,7 +7,7 @@
 #   ./install.sh --add-to-config    also load custom actions from init.lua
 #   ./install.sh --no-service       copy files only; run durable.lua yourself
 #   ./install.sh --no-pi-extension  skip installing ~/.pi/agent/extensions/rex-durable.ts
-#   ./install.sh --no-hooks         skip installing Claude/Droid SessionStart hooks
+#   ./install.sh --no-hooks         skip installing Claude/Droid/Cursor SessionStart hooks
 #   ./install.sh --no-skill         skip installing ~/.agents/skills/rex-durable
 #   REX=/path/to/rex ./install.sh   use this rex command
 #
@@ -106,7 +106,7 @@ if [ "$install_hooks" = 1 ] && [ -f "$here/hooks/rex-durable-hook.sh" ]; then
   chmod +x "$hook_script.new"
   mv "$hook_script.new" "$hook_script"
   if command -v python3 >/dev/null 2>&1; then
-    HOOK_SCRIPT="$hook_script" CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" FACTORY_DIR="$HOME/.factory" python3 - <<'PY'
+    HOOK_SCRIPT="$hook_script" CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" FACTORY_DIR="$HOME/.factory" CURSOR_DIR="${CURSOR_CONFIG_DIR:-$HOME/.cursor}" python3 - <<'PY'
 import json
 import os
 import shutil
@@ -171,12 +171,43 @@ for app, settings_path in targets:
         shutil.copymode(settings_path, tmp)
     os.replace(tmp, settings_path)
     print(f"Registered SessionStart hook for {app} in {settings_path}")
+
+cursor_dir = os.environ.get("CURSOR_DIR", "")
+if cursor_dir and os.path.isdir(cursor_dir):
+    cursor_hooks_path = os.path.join(cursor_dir, "hooks.json")
+    data = {}
+    if os.path.isfile(cursor_hooks_path):
+        try:
+            with open(cursor_hooks_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = None
+    if isinstance(data, dict):
+        data.setdefault("version", 1)
+        hooks = data.setdefault("hooks", {})
+        if isinstance(hooks, dict):
+            session_start = hooks.setdefault("sessionStart", [])
+            if isinstance(session_start, list):
+                cleaned = [
+                    entry for entry in session_start
+                    if not (isinstance(entry, dict) and "rex-durable-hook.sh" in str(entry.get("command", "")))
+                ]
+                cleaned.append({"command": f"sh '{hook_script}' cursor-agent"})
+                hooks["sessionStart"] = cleaned
+                tmp = cursor_hooks_path + ".rex-durable.tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                    f.write("\n")
+                if os.path.isfile(cursor_hooks_path):
+                    shutil.copymode(cursor_hooks_path, tmp)
+                os.replace(tmp, cursor_hooks_path)
+                print(f"Registered sessionStart hook for cursor-agent in {cursor_hooks_path}")
 PY
   fi
 fi
 
 if [ "$install_skill" = 1 ] && [ -f "$here/skills/rex-durable/SKILL.md" ]; then
-  for skill_root in "$HOME/.agents/skills" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills" "$HOME/.factory/skills"; do
+  for skill_root in "$HOME/.agents/skills" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills" "$HOME/.factory/skills" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/skills"; do
     if [ -d "$(dirname "$skill_root")" ]; then
       mkdir -p "$skill_root/rex-durable"
       cp "$here/skills/rex-durable/SKILL.md" "$skill_root/rex-durable/SKILL.md.new"
@@ -187,7 +218,7 @@ if [ "$install_skill" = 1 ] && [ -f "$here/skills/rex-durable/SKILL.md" ]; then
 fi
 
 service_path="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.factory/bin:$HOME/.gemini/antigravity-cli/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-for tool in fx claude codex pi agy droid node bun; do
+for tool in fx claude codex pi agy droid cursor-agent agent node bun; do
   where=$(command -v "$tool" 2>/dev/null || true)
   case "$where" in
     /*)

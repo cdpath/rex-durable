@@ -42,7 +42,7 @@ else
 fi
 
 if command -v python3 >/dev/null 2>&1; then
-  CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" FACTORY_DIR="$HOME/.factory" python3 - <<'PY' 2>/dev/null || true
+  CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" FACTORY_DIR="$HOME/.factory" CURSOR_DIR="${CURSOR_CONFIG_DIR:-$HOME/.cursor}" python3 - <<'PY' 2>/dev/null || true
 import json
 import os
 import shutil
@@ -83,11 +83,31 @@ for settings_path in [
             f.write("\n")
         shutil.copymode(settings_path, tmp)
         os.replace(tmp, settings_path)
+
+cursor_hooks_path = os.path.join(os.environ["CURSOR_DIR"], "hooks.json")
+if os.path.isfile(cursor_hooks_path):
+    with open(cursor_hooks_path, encoding="utf-8") as f:
+        data = json.load(f)
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    session_start = hooks.get("sessionStart") if isinstance(hooks, dict) else None
+    if isinstance(session_start, list):
+        cleaned = [
+            entry for entry in session_start
+            if not (isinstance(entry, dict) and "rex-durable-hook.sh" in str(entry.get("command", "")))
+        ]
+        if len(cleaned) != len(session_start):
+            hooks["sessionStart"] = cleaned
+            tmp = cursor_hooks_path + ".rex-durable.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+            shutil.copymode(cursor_hooks_path, tmp)
+            os.replace(tmp, cursor_hooks_path)
 PY
 fi
 
 rm -f "$data/durable.lua" "$data/rex-durable-hook.sh" "$config/rex_durable.lua" "$pi_agent_dir/extensions/rex-durable.ts"
-rm -rf "$HOME/.agents/skills/rex-durable" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/rex-durable" "$HOME/.factory/skills/rex-durable"
+rm -rf "$HOME/.agents/skills/rex-durable" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/rex-durable" "$HOME/.factory/skills/rex-durable" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/skills/rex-durable"
 
 if [ "$purge" = 1 ]; then
   rm -rf "$data" "$state"
