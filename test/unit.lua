@@ -92,6 +92,40 @@ check("droid session with no calling session is a main session",
 check("droid empty calling session is a main session", M.droid_is_subagent({ callingSessionId = "" }), false)
 check("droid unreadable header is not taken for a subagent's", M.droid_is_subagent(nil), false)
 
+check("md5 known vector", M.md5("hello"), "5d41402abc4b2a76b9719d911017c592")
+check("md5 empty string", M.md5(""), "d41d8cd98f00b204e9800998ecf8427e")
+local cur_id = "ffffffff-6666-4666-8666-ffffffffffff"
+local cur_id2 = "12121212-6666-4666-8666-121212121212"
+local cur_hash = M.md5("/Users/alice/proj")
+local cur_base = HOME .. "/.cursor/chats/" .. cur_hash .. "/"
+check("cursor-agent open store.db-wal maps to store.db",
+  { M.cursor_agent_session({ cur_base .. cur_id .. "/store.db-wal" }, HOME) },
+  { cur_id, cur_base .. cur_id .. "/store.db" })
+check("cursor-agent other profile ignored",
+  M.cursor_agent_session({ "/tmp/other/.cursor/chats/" .. cur_hash .. "/" .. cur_id .. "/store.db" }, HOME), nil)
+local function cur_meta_reader(path)
+  if path:find(cur_id, 1, true) then
+    return '{"hasConversation":true,"updatedAtMs":2000}'
+  end
+  if path:find(cur_id2, 1, true) then
+    return '{"hasConversation":false,"updatedAtMs":9000}'
+  end
+end
+check("cursor-agent prefers hasConversation over newer empty chat",
+  { M.cursor_agent_session({ cur_base .. cur_id2 .. "/store.db", cur_base .. cur_id .. "/store.db" }, HOME, cur_meta_reader) },
+  { cur_id, cur_base .. cur_id .. "/store.db" })
+local function cur_newer_reader(path)
+  if path:find(cur_id, 1, true) then
+    return '{"hasConversation":true,"updatedAtMs":1000}'
+  end
+  if path:find(cur_id2, 1, true) then
+    return '{"hasConversation":true,"updatedAtMs":5000}'
+  end
+end
+check("cursor-agent prefers highest updatedAtMs among active chats",
+  { M.cursor_agent_session({ cur_base .. cur_id .. "/store.db", cur_base .. cur_id2 .. "/store.db" }, HOME, cur_newer_reader) },
+  { cur_id2, cur_base .. cur_id2 .. "/store.db" })
+
 -- Many tabs closed at once
 local function snap_with(tabs, chats)
   local windows = {}
@@ -172,6 +206,16 @@ check("agy --switch", M.argv_session("agy", { "agy", "--switch", agy_main }), ag
 check("pi --session id", M.argv_session("pi", { "pi", "--session", pi_id }), pi_id)
 check("pi --session-id", M.argv_session("pi", { "pi", "--session-id", pi_id }), pi_id)
 check("pi --session path", { M.argv_session("pi", { "pi", "--session=" .. pi_file }) }, { pi_id, pi_file })
+check("cursor-agent --resume", M.argv_session("cursor-agent", { "cursor-agent", "--resume", cur_id }), cur_id)
+check("cursor-agent --resume=", M.argv_session("cursor-agent", { "agent", "--resume=" .. cur_id }), cur_id)
+check("cursor-agent resume subcommand with flags",
+  M.argv_session("cursor-agent", { "agent", "resume", "--model", "opus", cur_id }), cur_id)
+check("cursor-agent resume after wrapper args",
+  M.argv_session("cursor-agent", { "agent", "--use-system-ca", "/opt/cursor-agent/versions/1/index.js", "--resume", cur_id }), cur_id)
+check("cursor-agent -w does not swallow resume UUID",
+  M.argv_session("cursor-agent", { "agent", "resume", "-w", cur_id }), cur_id)
+check("cursor-agent --workspace UUID is not mistaken for resume",
+  M.argv_session("cursor-agent", { "agent", "--workspace", cur_id }), nil)
 check("claude via node", M.is_app("claude", "node", { "node", "/usr/local/bin/claude" }), true)
 check("pi via node", M.is_app("pi", "node", { "node", "/Users/me/.bun/bin/pi" }), true)
 check("pi via bun package", M.is_app("pi", "bun", { "bun", "/opt/pi-coding-agent/dist/cli.js" }), true)
@@ -184,6 +228,14 @@ check("pi via Rex terminal.process argv0 field",
 check("pi binary", M.is_app("pi", "pi", { "pi" }), true)
 check("agy binary", M.is_app("agy", "agy", { "/Users/me/.local/bin/agy" }), true)
 check("codex binary", M.is_app("codex", "codex", { "/opt/homebrew/bin/codex" }), true)
+check("cursor-agent binary", M.is_app("cursor-agent", "cursor-agent", { "/Users/me/.local/bin/cursor-agent" }), true)
+check("cursor-agent agent wrapper with --use-system-ca and index.js",
+  M.is_app("cursor-agent", { name = "agent", argv0 = "agent" },
+    { "agent", "--use-system-ca", "/Users/me/.local/share/cursor-agent/versions/2026.05/index.js", "--model", "opus" }), true)
+check("cursor-agent node path under cursor-agent",
+  M.is_app("cursor-agent", { name = "node", path = "/Users/me/.local/share/cursor-agent/versions/2026.05/node" }, { "agent" }), true)
+check("unrelated agent binary is not cursor-agent",
+  M.is_app("cursor-agent", { name = "agent" }, { "agent", "--port", "8080" }), false)
 check("not claude", M.is_app("claude", "node", { "node", "server.js" }), false)
 
 -- Commands that reopen a chat
@@ -228,6 +280,22 @@ check("droid resume keeps --auto and --use-spec, drops bare resume subcmd",
   cmd({ app = "droid", id = droid_id,
         argv = { "droid", "resume", "--auto", "high", "--use-spec" } }),
   "droid --auto high --use-spec --resume " .. droid_id)
+check("cursor-agent preserves agent alias and kept options",
+  cmd({ app = "cursor-agent", id = cur_id,
+        argv = { "agent", "--model", "opus", "--yolo", "--api-key", "secret123" } }),
+  "agent --model opus --yolo --resume " .. cur_id)
+check("cursor-agent missing path preserves basename alias",
+  cmd({ app = "cursor-agent", id = cur_id,
+        argv = { "/nonexistent/bin/agent", "--plan" } }),
+  "agent --plan --resume " .. cur_id)
+check("cursor-agent -w with value and without value",
+  cmd({ app = "cursor-agent", id = cur_id,
+        argv = { "cursor-agent", "-w", "feat-x", "--worktree", "--yolo" } }),
+  "cursor-agent -w feat-x --worktree --yolo --resume " .. cur_id)
+check("cursor-agent --worktree=val and bare --worktree before resume",
+  cmd({ app = "cursor-agent", id = cur_id,
+        argv = { "agent", "--worktree=feat-y", "--worktree", "resume", cur_id } }),
+  "agent --worktree=feat-y --worktree --resume " .. cur_id)
 check("quote spaces", M.join({ "cd", "/a b/it's" }), "cd '/a b/it'\\''s'")
 
 -- Block record from Pi extension (verified by PID, recovers flags hidden by process.title)
@@ -255,16 +323,76 @@ local stale_desc = M.describe({
   ancestors = { { pid = 90000002, name = "zsh", cwd = "/w" } },
 }, { ps = { [90000011] = { age = 5, args = "pi" } }, files = {}, now = os.time(), state_dir = tmp_state }, blk)
 check("stale block record with mismatched PID is ignored", stale_desc.id, nil)
+
+local cur_blk = "block:01a1ec5d-cursor"
+local cf = assert(io.open(M.block_file(cur_blk, tmp_state), "wb"))
+cf:write(rex.json.encode({
+  block_id = cur_blk, app = "cursor-agent", pid = 90000020, id = cur_id,
+  session_file = cur_base .. cur_id .. "/store.db",
+}))
+cf:close()
+local cur_alias_desc = M.describe({
+  foreground = { pid = 90000020, name = "agent", cwd = "/w" },
+  ancestors = { { pid = 90000002, name = "zsh", cwd = "/w" } },
+}, {
+  ps = { [90000020] = { age = 10, args = "agent --model opus --api-key sk-secret" } },
+  files = {}, now = os.time(), state_dir = tmp_state,
+}, cur_blk)
+check("agent corroborated by block record strips --api-key and resumes as agent",
+  { cur_alias_desc.kind, cur_alias_desc.app, cur_alias_desc.id, cur_alias_desc.argv, cmd(cur_alias_desc) },
+  { "chat", "cursor-agent", cur_id, { "agent", "--model", "opus" }, "agent --model opus --resume " .. cur_id })
+
+local cur_wrap_desc = M.describe({
+  foreground = { pid = 90000021, name = "agent", cwd = "/w" },
+  ancestors = { { pid = 90000002, name = "zsh", cwd = "/w" } },
+}, {
+  ps = { [90000021] = { age = 10, args = "agent --use-system-ca /opt/cursor-agent/versions/1/index.js --api-key=secret --workspace /tmp/worker" } },
+  files = { [90000021] = { cur_base .. cur_id .. "/store.db" } }, now = os.time(),
+})
+check("cursor-agent wrapper strips internal args and --workspace /tmp/worker stays a chat",
+  { cur_wrap_desc.kind, cur_wrap_desc.app, cur_wrap_desc.id, cur_wrap_desc.argv },
+  { "chat", "cursor-agent", cur_id, { "agent", "--workspace", "/tmp/worker" } })
+
+local cur_print_desc = M.describe({
+  foreground = { pid = 90000022, name = "cursor-agent", cwd = "/w" },
+  ancestors = { { pid = 90000002, name = "zsh", cwd = "/w" } },
+}, {
+  ps = { [90000022] = { age = 10, args = "cursor-agent -p hello" } },
+  files = {}, now = os.time(),
+})
+check("cursor-agent -p is treated as non-chat program",
+  { cur_print_desc.kind, cur_print_desc.argv }, { "program", { "cursor-agent", "-p", "hello" } })
+
+local cur_worker_desc = M.describe({
+  foreground = { pid = 90000023, name = "cursor-agent", cwd = "/w" },
+  ancestors = { { pid = 90000002, name = "zsh", cwd = "/w" } },
+}, {
+  ps = { [90000023] = { age = 10, args = "cursor-agent worker" } },
+  files = {}, now = os.time(),
+})
+check("cursor-agent worker subcommand is treated as non-chat program",
+  { cur_worker_desc.kind, cur_worker_desc.argv }, { "program", { "cursor-agent", "worker" } })
+
+local other_agent_desc = M.describe({
+  foreground = { pid = 90000024, name = "agent", cwd = "/w" },
+  ancestors = { { pid = 90000002, name = "zsh", cwd = "/w" } },
+}, {
+  ps = { [90000024] = { age = 10, args = "agent --port 8080" } },
+  files = {}, now = os.time(),
+})
+check("unrelated agent binary without corroboration is saved as program",
+  { other_agent_desc.kind, other_agent_desc.argv }, { "program", { "agent", "--port", "8080" } })
+
 rex.exec({ "rm", "-rf", tmp_state })
 
--- Summary includes pi and agy
 local sum_snap = { sessions = { { label = "work", windows = {
   { layout = { split = { direction = "horizontal", ratio = 0.5,
     before = { pane = { kind = "chat", app = "pi", id = pi_id } },
     after = { pane = { kind = "chat", app = "agy", id = agy_main } } } } },
+  { layout = { pane = { kind = "chat", app = "cursor-agent", id = cur_id } } },
 } } } }
-check("summary lists pi and agy", (M.summary(sum_snap)),
-  "1 sessions, 1 tabs, 2 chats (1 pi, 1 agy), 0 other programs")
+check("summary lists pi, agy, and cursor-agent", (M.summary(sum_snap)),
+  "1 sessions, 2 tabs, 3 chats (1 pi, 1 agy, 1 cursor-agent), 0 other programs")
 
 -- What a tab runs (process IDs above any real pid_max, so /proc never answers)
 local proc = {
