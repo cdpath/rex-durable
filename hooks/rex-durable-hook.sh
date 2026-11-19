@@ -1,8 +1,9 @@
 #!/bin/sh
 # Installed by rex-durable into <data_dir>/rex-durable-hook.sh
-# SessionStart hook for Claude Code (~/.claude/settings.json) and Factory Droid
-# (~/.factory/settings.json). Records { block_id, pid, app, id, session_file }
-# when running inside a Rex terminal block (REX_BLOCK).
+# SessionStart hook for Claude Code (~/.claude/settings.json), Factory Droid
+# (~/.factory/settings.json), and Cursor Agent (~/.cursor/hooks.json). Records
+# { block_id, pid, app, id, session_file } when running inside a Rex terminal
+# block (REX_BLOCK).
 set -eu
 
 [ -n "${REX_BLOCK:-}" ] || exit 0
@@ -33,21 +34,53 @@ try:
 except Exception:
     raise SystemExit(0)
 
-if payload.get("agent_id") or payload.get("calling_session_id"):
-    # Subagent SessionStart (Claude agent_id, Droid Task calling_session_id);
-    # keep the main session ID.
+if not isinstance(payload, dict):
     raise SystemExit(0)
 
-session_id = payload.get("session_id")
-if not isinstance(session_id, str) or not session_id:
+event_name = payload.get("hook_event_name") or payload.get("hookEventName")
+if event_name is not None and event_name not in ("SessionStart", "sessionStart"):
     raise SystemExit(0)
 
-transcript_path = payload.get("transcript_path")
+if any(
+    payload.get(k)
+    for k in (
+        "agent_id",
+        "agentId",
+        "calling_session_id",
+        "callingSessionId",
+        "parent_session_id",
+        "parentSessionId",
+        "is_subagent",
+        "isSubagent",
+        "is_background_agent",
+    )
+):
+    raise SystemExit(0)
+
+session_id = next(
+    (
+        payload.get(k)
+        for k in ("session_id", "sessionId", "conversation_id", "conversationId")
+        if isinstance(payload.get(k), str) and payload.get(k)
+    ),
+    None,
+)
+if not session_id:
+    raise SystemExit(0)
+
+transcript_path = payload.get("transcript_path") or payload.get("transcriptPath")
 session_file = (
     transcript_path
     if isinstance(transcript_path, str) and transcript_path.startswith("/")
     else None
 )
+
+cwd = payload.get("cwd")
+if not isinstance(cwd, str) or not cwd:
+    roots = payload.get("workspace_roots")
+    cwd = next((r for r in roots if isinstance(r, str) and r), None) if isinstance(roots, list) else None
+if not cwd:
+    cwd = os.getcwd()
 
 owner_pid = None
 cur = os.getppid()
@@ -69,6 +102,10 @@ for _ in range(6):
         comm == app
         or (app == "claude" and (comm.startswith("node") or "claude" in comm))
         or (app == "droid" and "droid" in comm)
+        or (
+            app == "cursor-agent"
+            and (comm in ("cursor-agent", "agent") or comm.startswith("node") or "cursor-agent" in comm)
+        )
     ):
         owner_pid = cur
         break
@@ -103,7 +140,7 @@ record = {
     "pid": owner_pid,
     "id": session_id,
     "session_file": session_file,
-    "cwd": payload.get("cwd") or os.getcwd(),
+    "cwd": cwd,
     "updated_at": int(time.time()),
 }
 record = {k: v for k, v in record.items() if v is not None}

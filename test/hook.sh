@@ -39,6 +39,8 @@ int main(int argc, char **argv) {
 EOF
 cc -O0 -o "$T/bin/droid" "$T/launcher.c"
 cp "$T/bin/droid" "$T/bin/claude"
+cp "$T/bin/droid" "$T/bin/cursor-agent"
+cp "$T/bin/droid" "$T/bin/agent"
 sed "s|@STATE_DIR@|$T/state|" "$here/hooks/rex-durable-hook.sh" >"$T/hook.sh"
 
 ROOT=aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa
@@ -82,6 +84,34 @@ expect "outside Rex nothing is recorded" test ! -e "$T/state/blocks"
 fire claude "$(payload "$ROOT" ',"source":"startup"')"
 expect "claude session is recorded for its block" test "$(field id)" = "$ROOT"
 expect "the record names claude" test "$(field app)" = claude
+
+fire_as() { # bin app payload [block id]
+  local bin=$1 app=$2 json=$3 block=${4-$BLOCK}
+  printf '%s' "$json" |
+    env -u REX_BLOCK -u REX_DURABLE_STATE_DIR ${block:+REX_BLOCK=$block} \
+      "$T/bin/$bin" "sh '$T/hook.sh' $app" || true
+}
+
+rm -rf "$T/state/blocks"
+fire_as cursor-agent cursor-agent '{"session_id":"'"$ROOT"'","workspace_roots":["/tmp/ws"],"hook_event_name":"sessionStart"}'
+expect "cursor-agent sessionStart records session_id" test "$(field id)" = "$ROOT"
+expect "cursor-agent record names cursor-agent" test "$(field app)" = cursor-agent
+expect "cursor-agent record takes cwd from workspace_roots" test "$(field cwd)" = "/tmp/ws"
+
+fire_as agent cursor-agent '{"conversation_id":"'"$NEXT"'","workspace_roots":["/tmp/ws2"],"hook_event_name":"sessionStart"}'
+expect "agent launcher records conversation_id for cursor-agent" test "$(field id)" = "$NEXT"
+expect "agent launcher record names cursor-agent" test "$(field app)" = cursor-agent
+expect "agent launcher updates cwd from workspace_roots" test "$(field cwd)" = "/tmp/ws2"
+
+fire_as agent cursor-agent '{"conversation_id":"'"$WORKER"'","is_subagent":true,"hook_event_name":"sessionStart"}'
+expect "cursor-agent subagent sessionStart leaves main session recorded" test "$(field id)" = "$NEXT"
+
+fire_as agent cursor-agent '{"conversation_id":"'"$WORKER"'","hook_event_name":"stop"}'
+expect "cursor-agent non-sessionStart event is ignored" test "$(field id)" = "$NEXT"
+
+rm -rf "$T/state/blocks"
+fire_as cursor-agent cursor-agent '{"session_id":"'"$ROOT"'","hook_event_name":"sessionStart"}' ""
+expect "cursor-agent outside Rex records nothing" test ! -e "$T/state/blocks"
 
 echo
 echo "$passed passed, $failed failed"

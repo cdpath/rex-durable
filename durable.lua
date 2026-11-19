@@ -18,16 +18,17 @@ Supported coding agents (auto-resumed on their exact conversation):
   * Antigravity CLI (`agy --conversation <id>`)
   * Pi coding agent (`pi --session <id>`)
   * Factory Droid (`droid --resume <id>`)
+  * Cursor Agent (`cursor-agent --resume <id>` / `agent --resume <id>`)
   * Claude Code (`claude --resume <id>`)
   * Codex (`codex resume <id>`)
   * fx (`fx --resume <id>`)
 
 MIT License — based on https://github.com/fazxes/rex-durable, redesigned for
-idiomatic Rex APIs with Pi, Antigravity CLI, and Factory Droid support.
+idiomatic Rex APIs with Pi, Antigravity CLI, Factory Droid, and Cursor Agent support.
 ]]
 
 local M = {}
-M.VERSION = "0.5.0"
+M.VERSION = "0.6.0"
 
 local TERMINAL = "com.superlogical.terminal"
 local SHELL_FLAVOR = "com.superlogical.terminal.shell"
@@ -51,7 +52,7 @@ local SHELLS = {
   nu = true, sh = true, tcsh = true, xonsh = true, zsh = true,
 }
 
-M.APPS = { "fx", "claude", "codex", "pi", "agy", "droid" }
+M.APPS = { "fx", "claude", "codex", "pi", "agy", "droid", "cursor-agent" }
 
 -- Options each chat program keeps when it reopens. Anything else on the
 -- original command line, such as an internal relaunch flag or old resume ID,
@@ -105,6 +106,35 @@ M.CHATS = {
                ["--append-system-prompt-file"] = true, ["--cwd"] = true,
                ["-w"] = true, ["--worktree"] = true, ["--auto"] = true },
     switches = { ["--use-spec"] = true, ["--disable-builtin-skills"] = true },
+  },
+  ["cursor-agent"] = {
+    aliases = { agent = true },
+    values = {
+      ["--model"] = true, ["--mode"] = true, ["--sandbox"] = true,
+      ["--workspace"] = true, ["--add-dir"] = true, ["--plugin-dir"] = true,
+      ["--worktree-base"] = true, ["-e"] = true, ["--endpoint"] = true,
+    },
+    optional_values = {
+      ["-w"] = true, ["--worktree"] = true,
+    },
+    switches = {
+      ["--plan"] = true, ["-f"] = true, ["--force"] = true, ["--yolo"] = true,
+      ["--auto-review"] = true, ["--approve-mcps"] = true, ["--trust"] = true,
+      ["--skip-worktree-setup"] = true,
+    },
+    non_chat_flags = {
+      ["-p"] = true, ["--print"] = true, ["--output-format"] = true,
+      ["--stream-partial-output"] = true, ["--list-models"] = true,
+      ["--help"] = true, ["-h"] = true, ["--version"] = true, ["-v"] = true,
+    },
+    non_chat_subcommands = {
+      login = true, logout = true, mcp = true, plugin = true, worker = true,
+      status = true, whoami = true, models = true, team = true, bedrock = true,
+      about = true, update = true, ["create-chat"] = true, ls = true, help = true,
+    },
+    secret_values = {
+      ["--api-key"] = true, ["-H"] = true, ["--header"] = true,
+    },
   },
 }
 
@@ -581,6 +611,185 @@ function M.agy_session(files, home, reader)
   return chosen, base .. "brain/" .. chosen
 end
 
+local function normalize_cwd(dir)
+  if type(dir) ~= "string" or dir == "" then return nil end
+  local stripped = dir:gsub("/+$", "")
+  return stripped == "" and "/" or stripped
+end
+
+local md5_cache = {}
+function M.md5(text)
+  text = tostring(text or "")
+  if md5_cache[text] ~= nil then return md5_cache[text] or nil end
+  local out = stdout_of({
+    "sh", "-c",
+    'if command -v md5 >/dev/null 2>&1; then printf "%s" "$1" | md5 -q; ' ..
+    'elif command -v md5sum >/dev/null 2>&1; then printf "%s" "$1" | md5sum | awk \'{print $1}\'; ' ..
+    'elif command -v openssl >/dev/null 2>&1; then printf "%s" "$1" | openssl md5 -r | awk \'{print $1}\'; ' ..
+    'fi',
+    "sh", text,
+  })
+  local hex = out:lower():match("(%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x)")
+  md5_cache[text] = hex or false
+  return hex
+end
+
+local function cursor_meta(path, reader)
+  local text = (reader or read_file)(path)
+  if not text then return nil end
+  local ok, decoded = pcall(rex.json.decode, text)
+  return ok and type(decoded) == "table" and decoded or nil
+end
+
+function M.cursor_agent_session(files, home, reader)
+  local base = (home or HOME) .. "/.cursor/chats/"
+  local found, seen = {}, {}
+  for _, f in ipairs(list(files)) do
+    local rest = under(f, base)
+    if rest then
+      local hash, id = rest:match("^([^/]+)/(" .. UUID .. ")/")
+      if hash and id and not seen[id] then
+        seen[id] = true
+        found[#found + 1] = { hash = hash, id = id }
+      end
+    end
+  end
+  if #found == 0 then return nil end
+  if #found == 1 then
+    return found[1].id, base .. found[1].hash .. "/" .. found[1].id .. "/store.db"
+  end
+  local best, best_has_conv, best_updated
+  for _, item in ipairs(found) do
+    local meta = cursor_meta(base .. item.hash .. "/" .. item.id .. "/meta.json", reader)
+    local has_conv = not (meta and meta.hasConversation == false)
+    local updated = (meta and tonumber(meta.updatedAtMs)) or -1
+    if not best
+      or (has_conv and not best_has_conv)
+      or (has_conv == best_has_conv and updated > best_updated) then
+      best, best_has_conv, best_updated = item, has_conv, updated
+    end
+  end
+  return best.id, base .. best.hash .. "/" .. best.id .. "/store.db"
+end
+
+local function is_app_executable(app, exe)
+  if type(exe) ~= "string" or exe == "" then return false end
+  local base = basename(exe)
+  if base == app then return true end
+  local spec = M.CHATS[app]
+  return spec ~= nil and spec.aliases ~= nil and spec.aliases[base] == true
+end
+
+local function has_app_alias(app, proc_or_name, argv)
+  local spec = M.CHATS[app]
+  if not (spec and spec.aliases) then return false end
+  local p = type(proc_or_name) == "table" and proc_or_name or { name = proc_or_name }
+  for _, field in ipairs({ "name", "argv0", "invoked_path", "path" }) do
+    if p[field] and spec.aliases[basename(p[field])] then return true end
+  end
+  argv = list(argv)
+  return argv[1] ~= nil and spec.aliases[basename(argv[1])] == true
+end
+
+local function matches_script_path(app, script)
+  if type(script) ~= "string" or script == "" then return false end
+  return basename(script) == app
+    or script:sub(1, #app + 1) == app .. "/"
+    or script:find("/" .. app .. "/", 1, true) ~= nil
+    or (app == "claude" and script:find("claude-code", 1, true) ~= nil)
+    or (app == "pi" and script:find("pi-coding-agent", 1, true) ~= nil)
+end
+
+local function cursor_args_start(argv)
+  local i = 2
+  while i <= #argv and (argv[i] == "--use-system-ca" or matches_script_path("cursor-agent", argv[i])) do
+    i = i + 1
+  end
+  return i
+end
+
+local function optional_value_arg(arg)
+  return type(arg) == "string"
+    and arg ~= ""
+    and arg ~= "--"
+    and arg ~= "resume"
+    and arg:sub(1, 1) ~= "-"
+    and not arg:match("^" .. UUID .. "$")
+end
+
+local function sanitize_cursor_argv(argv)
+  argv = list(argv)
+  if #argv == 0 then return {} end
+  local secrets = (M.CHATS["cursor-agent"] and M.CHATS["cursor-agent"].secret_values) or {}
+  local out = { argv[1] }
+  local i = is_app_executable("cursor-agent", argv[1]) and cursor_args_start(argv) or 2
+  local passthrough = false
+  while i <= #argv do
+    local a = argv[i]
+    if not passthrough then
+      if a == "--" then
+        passthrough = true
+        out[#out + 1] = a
+        i = i + 1
+      else
+        local name = a:match("^(%-%-?[%w%-]+)=") or a
+        if secrets[name] then
+          i = i + (a == name and 2 or 1)
+        else
+          out[#out + 1] = a
+          i = i + 1
+        end
+      end
+    else
+      out[#out + 1] = a
+      i = i + 1
+    end
+  end
+  return out
+end
+
+local function is_non_chat_cursor_argv(argv)
+  local spec = M.CHATS["cursor-agent"]
+  local non_chat_flags = spec.non_chat_flags or {}
+  local non_chat_subcommands = spec.non_chat_subcommands or {}
+  local values = spec.values or {}
+  local secret_values = spec.secret_values or {}
+  local optional_values = spec.optional_values or {}
+  local i = cursor_args_start(argv)
+  local saw_positional = false
+  while i <= #argv do
+    local a = argv[i]
+    if a == "--" then break end
+    local name = a:match("^(%-%-?[%w%-]+)=") or a
+    if non_chat_flags[name] then return true end
+    if values[name] or secret_values[name] then
+      i = i + (a == name and 2 or 1)
+    elseif optional_values[name] then
+      if a == name and optional_value_arg(argv[i + 1]) then
+        i = i + 2
+      else
+        i = i + 1
+      end
+    elseif a:sub(1, 1) == "-" then
+      i = i + 1
+    else
+      if not saw_positional then
+        saw_positional = true
+        if non_chat_subcommands[a] then return true end
+      end
+      i = i + 1
+    end
+  end
+  return false
+end
+
+local function has_cursor_open_file(files)
+  for _, f in ipairs(list(files)) do
+    if type(f) == "string" and f:find("/cursor-agent/", 1, true) then return true end
+  end
+  return false
+end
+
 local function parse_pi_session_arg(arg)
   if type(arg) ~= "string" or arg == "" then return nil end
   if arg:match("^" .. UUID .. "$") then return arg, nil end
@@ -591,6 +800,43 @@ end
 
 function M.argv_session(app, argv)
   argv = list(argv)
+  if app == "cursor-agent" then
+    local spec = M.CHATS["cursor-agent"]
+    local values = spec.values or {}
+    local secret_values = spec.secret_values or {}
+    local optional_values = spec.optional_values or {}
+    local i = cursor_args_start(argv)
+    local saw_resume = false
+    while i <= #argv do
+      local a = argv[i]
+      if a == "--" then break end
+      local b = argv[i + 1]
+      local name = a:match("^(%-%-?[%w%-]+)=") or a
+      if a == "--resume" and b and b:match("^" .. UUID .. "$") then
+        return b
+      end
+      local eq = a:match("^%-%-resume=(" .. UUID .. ")$")
+      if eq then return eq end
+      if a == "resume" and not saw_resume then
+        saw_resume = true
+        if b and b:match("^" .. UUID .. "$") then return b end
+        i = i + 1
+      elseif saw_resume and a:match("^" .. UUID .. "$") then
+        return a
+      elseif values[name] or secret_values[name] then
+        i = i + (a == name and 2 or 1)
+      elseif optional_values[name] then
+        if a == name and optional_value_arg(b) then
+          i = i + 2
+        else
+          i = i + 1
+        end
+      else
+        i = i + 1
+      end
+    end
+    return nil
+  end
   local saw_resume_subcmd = false
   for i = 1, #argv do
     local a = argv[i]
@@ -639,14 +885,6 @@ function M.argv_session(app, argv)
   end
 end
 
-local function matches_script_path(app, script)
-  if type(script) ~= "string" or script == "" then return false end
-  return basename(script) == app
-    or script:find("/" .. app .. "/", 1, true) ~= nil
-    or (app == "claude" and script:find("claude-code", 1, true) ~= nil)
-    or (app == "pi" and script:find("pi-coding-agent", 1, true) ~= nil)
-end
-
 -- Uses Rex's native `com.superlogical.terminal.process` fields (`script`,
 -- `invoked_path`, `path`, `argv0`, `name`) as well as `ps` `argv`.
 -- Accepts either a process table `p` or a process name string.
@@ -657,10 +895,12 @@ function M.is_app(app, proc_or_name, argv)
     if p[field] and basename(p[field]) == app then return true end
   end
   if argv[1] and basename(argv[1]) == app then return true end
-  if matches_script_path(app, p.script) then return true end
+  for _, field in ipairs({ "script", "path", "invoked_path" }) do
+    if matches_script_path(app, p[field]) then return true end
+  end
   local launcher = basename(argv[1] or p.name or "")
-  if launcher:match("^node") or launcher:match("^bun") then
-    for i = 2, math.min(#argv, 3) do
+  if launcher:match("^node") or launcher:match("^bun") or is_app_executable(app, launcher) then
+    for i = 2, math.min(#argv, 4) do
       if matches_script_path(app, argv[i]) then return true end
     end
   end
@@ -672,38 +912,61 @@ local function chat_in(p, info, block_id)
   local argv = argv_of(p.pid, info.ps[p.pid])
   local id, store = M.fx_session(files)
   if id then return { kind = "chat", app = "fx", id = id, store = store, argv = argv } end
-  for _, app in ipairs({ "claude", "codex", "pi", "agy", "droid" }) do
-    if M.is_app(app, p, argv) then
-      local rec = M.block_record(block_id, p.pid, app, info.state_dir)
-      if rec then
-        local rec_argv = (type(rec.argv) == "table" and #rec.argv > 0) and rec.argv or argv
-        if rec.ephemeral == true then
-          return { kind = "program", argv = rec_argv }
+  for _, app in ipairs(M.APPS) do
+    if app ~= "fx" then
+      local matched = M.is_app(app, p, argv)
+      local rec, found, file
+      if not matched and has_app_alias(app, p, argv) then
+        rec = M.block_record(block_id, p.pid, app, info.state_dir)
+        if rec then
+          matched = true
+        elseif app == "cursor-agent" then
+          found, file = M.cursor_agent_session(files)
+          if found or has_cursor_open_file(files) then matched = true end
         end
-        if type(rec.id) == "string" and rec.id ~= "" then
-          return { kind = "chat", app = app, id = rec.id, session_file = rec.session_file,
-                   argv = rec_argv, pid = p.pid }
+      end
+      if matched then
+        if app == "cursor-agent" then
+          argv = sanitize_cursor_argv(argv)
+          if is_non_chat_cursor_argv(argv) then
+            return { kind = "program", argv = argv }
+          end
         end
-        argv = rec_argv
+        rec = rec or M.block_record(block_id, p.pid, app, info.state_dir)
+        if rec then
+          local rec_argv = (type(rec.argv) == "table" and #rec.argv > 0) and rec.argv or argv
+          if app == "cursor-agent" then rec_argv = sanitize_cursor_argv(rec_argv) end
+          if rec.ephemeral == true then
+            return { kind = "program", argv = rec_argv }
+          end
+          if type(rec.id) == "string" and rec.id ~= "" then
+            return { kind = "chat", app = app, id = rec.id, session_file = rec.session_file,
+                     argv = rec_argv, pid = p.pid }
+          end
+          argv = rec_argv
+        end
+        if not found then
+          if app == "claude" then
+            found, file = M.claude_session(files)
+          elseif app == "codex" then
+            found, file = M.codex_session(files)
+          elseif app == "pi" then
+            found, file = M.pi_session(files)
+          elseif app == "agy" then
+            found, file = M.agy_session(files)
+          elseif app == "droid" then
+            found, file = M.droid_session(files)
+          elseif app == "cursor-agent" then
+            found, file = M.cursor_agent_session(files)
+          end
+        end
+        if not found then
+          local argv_id, argv_file = M.argv_session(app, argv)
+          found, file = argv_id, argv_file or file
+        end
+        return { kind = "chat", app = app, id = found,
+                 session_file = file, argv = argv, pid = p.pid }
       end
-      local found, file
-      if app == "claude" then
-        found, file = M.claude_session(files)
-      elseif app == "codex" then
-        found, file = M.codex_session(files)
-      elseif app == "pi" then
-        found, file = M.pi_session(files)
-      elseif app == "agy" then
-        found, file = M.agy_session(files)
-      elseif app == "droid" then
-        found, file = M.droid_session(files)
-      end
-      if not found then
-        local argv_id, argv_file = M.argv_session(app, argv)
-        found, file = argv_id, argv_file or file
-      end
-      return { kind = "chat", app = app, id = found,
-               session_file = file, argv = argv, pid = p.pid }
     end
   end
 end
@@ -751,10 +1014,113 @@ local function droid_header(path)
   if ok and type(meta) == "table" and meta.type == "session_start" then return meta end
 end
 
+local function cursor_workspace_arg(argv, cwd)
+  argv = list(argv)
+  local i = cursor_args_start(argv)
+  local ws
+  while i <= #argv do
+    local a = argv[i]
+    if a == "--" then break end
+    if a == "--workspace" and argv[i + 1] then
+      ws = argv[i + 1]
+      i = i + 2
+    else
+      local val = a:match("^%-%-workspace=(.+)$")
+      if val then ws = val end
+      i = i + 1
+    end
+  end
+  if not ws or ws == "" then return nil end
+  if ws:sub(1, 1) ~= "/" and cwd and cwd ~= "" then
+    ws = normalize_cwd(cwd) .. "/" .. ws
+  end
+  return normalize_cwd(ws)
+end
+
+local function realpath_of(dir)
+  if not dir or dir == "" then return nil end
+  local rp = stdout_of({ "sh", "-c", 'cd -- "$1" 2>/dev/null && pwd -P', "sh", dir }):gsub("%s+$", "")
+  return rp ~= "" and normalize_cwd(rp) or nil
+end
+
+local function newest_cursor_session(pane, since)
+  local dirs, dir_set = {}, {}
+  local function add_dir(d)
+    local norm = normalize_cwd(d)
+    if norm and not dir_set[norm] then
+      dir_set[norm] = true
+      dirs[#dirs + 1] = norm
+      local rp = realpath_of(norm)
+      if rp and not dir_set[rp] then
+        dir_set[rp] = true
+        dirs[#dirs + 1] = rp
+      end
+    end
+  end
+  add_dir(cursor_workspace_arg(pane.argv, pane.cwd))
+  add_dir(pane.cwd)
+
+  local entries, stat_paths = {}, {}
+  local seen_subdirs = {}
+  for _, dir in ipairs(dirs) do
+    local hash = M.md5(dir)
+    if hash then
+      for _, subdir in ipairs(list_dir(HOME .. "/.cursor/chats/" .. hash)) do
+        local id = basename(subdir)
+        if id:match("^" .. UUID .. "$") and not seen_subdirs[subdir] then
+          seen_subdirs[subdir] = true
+          local meta = cursor_meta(subdir .. "/meta.json")
+          local meta_cwd = meta and type(meta.cwd) == "string" and normalize_cwd(meta.cwd) or nil
+          if not meta_cwd or dir_set[meta_cwd] then
+            local check_files = {}
+            for _, fname in ipairs({ "store.db", "store.db-wal", "meta.json" }) do
+              local p = subdir .. "/" .. fname
+              if file_exists(p) then
+                check_files[#check_files + 1] = p
+                stat_paths[#stat_paths + 1] = p
+              end
+            end
+            entries[#entries + 1] = {
+              id = id,
+              subdir = subdir,
+              has_conv = not (meta and meta.hasConversation == false),
+              updated_s = meta and tonumber(meta.updatedAtMs) and math.floor(tonumber(meta.updatedAtMs) / 1000) or nil,
+              files = check_files,
+            }
+          end
+        end
+      end
+    end
+  end
+  if #entries == 0 then return nil end
+
+  local times = mtimes(stat_paths)
+  local best, best_has_conv, best_time
+  for _, e in ipairs(entries) do
+    local t = e.updated_s
+    for _, p in ipairs(e.files) do
+      if times[p] and (not t or times[p] > t) then t = times[p] end
+    end
+    if t and t >= since then
+      if not best
+        or (e.has_conv and not best_has_conv)
+        or (e.has_conv == best_has_conv and t > best_time) then
+        best, best_has_conv, best_time = e, e.has_conv, t
+      end
+    end
+  end
+  if not best then return nil end
+  local db = best.subdir .. "/store.db"
+  return best.id, file_exists(db) and db or (best.subdir .. "/meta.json")
+end
+
 local function newest_session_file(pane, info)
   if pane.app == "agy" then return nil end
   local age = (info.ps[pane.pid] or {}).age or 0
   local since = info.now - age - 5
+  if pane.app == "cursor-agent" then
+    return newest_cursor_session(pane, since)
+  end
   local candidates = {}
   if pane.app == "claude" then
     candidates = list_dir(HOME .. "/.claude/projects/" .. M.claude_slug(pane.cwd), ".jsonl")
@@ -1152,20 +1518,33 @@ function M.kept_options(argv, spec)
   local out, i = {}, 2
   argv = list(argv)
   spec = spec or { values = {}, switches = {} }
+  local switches = spec.switches or {}
+  local values = spec.values or {}
+  local optional_values = spec.optional_values or {}
   while i <= #argv do
     local a = argv[i]
     if a == "--" then break end
     i = i + 1
     local name = a:match("^(%-%-?[%w%-]+)=") or a
-    if spec.switches[a] then
+    if switches[a] then
       out[#out + 1] = a
-    elseif spec.values[name] then
+    elseif values[name] then
       if a ~= name then
         out[#out + 1] = a
       elseif i <= #argv then
         out[#out + 1] = a
         out[#out + 1] = argv[i]
         i = i + 1
+      end
+    elseif optional_values[name] then
+      if a ~= name then
+        out[#out + 1] = a
+      else
+        out[#out + 1] = a
+        if i <= #argv and optional_value_arg(argv[i]) then
+          out[#out + 1] = argv[i]
+          i = i + 1
+        end
       end
     end
   end
@@ -1174,8 +1553,8 @@ end
 
 local function chat_executable(pane)
   local exe = list(pane.argv)[1]
-  if not exe or basename(exe) ~= pane.app then exe = pane.app end
-  if exe:find("/", 1, true) and not file_exists(exe) then exe = pane.app end
+  if not exe or not is_app_executable(pane.app, exe) then exe = pane.app end
+  if exe:find("/", 1, true) and not file_exists(exe) then exe = basename(exe) end
   return exe
 end
 
@@ -1200,7 +1579,7 @@ function M.resume_argv(pane, accepts)
       argv[#argv + 1] = "--sessions-v2"
     end
     argv[#argv + 1] = "--resume"
-  elseif pane.app == "claude" or pane.app == "droid" then
+  elseif pane.app == "claude" or pane.app == "droid" or pane.app == "cursor-agent" then
     argv[#argv + 1] = "--resume"
   elseif pane.app == "pi" then
     argv[#argv + 1] = "--session"
@@ -1240,6 +1619,11 @@ local function open_chats(saved, live)
               (p.store == "v2" and ("v2/" .. p.id .. "/lock") or (p.id .. "/session.lock"))
           elseif p.app == "agy" then
             path = path or (HOME .. "/.gemini/antigravity-cli/brain/" .. p.id)
+          elseif p.app == "cursor-agent" then
+            if not path and p.cwd then
+              local hash = M.md5(normalize_cwd(p.cwd))
+              if hash then path = HOME .. "/.cursor/chats/" .. hash .. "/" .. p.id .. "/store.db" end
+            end
           end
           if path and p.app ~= "claude" and p.app ~= "pi" and p.app ~= "droid" then
             paths[#paths + 1] = path

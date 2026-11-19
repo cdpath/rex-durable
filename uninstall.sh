@@ -42,20 +42,51 @@ else
 fi
 
 if command -v python3 >/dev/null 2>&1; then
-  CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" FACTORY_DIR="$HOME/.factory" python3 - <<'PY' 2>/dev/null || true
+  HOOK_SCRIPT="$data/rex-durable-hook.sh" CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" FACTORY_DIR="$HOME/.factory" CURSOR_DIR="${CURSOR_CONFIG_DIR:-$HOME/.cursor}" python3 - <<'PY' || true
 import json
 import os
+import shlex
 import shutil
+import sys
 
-for settings_path in [
-    os.path.join(os.environ["CLAUDE_DIR"], "settings.json"),
-    os.path.join(os.environ["FACTORY_DIR"], "settings.json"),
+norm_hook_script = os.path.normpath(os.environ["HOOK_SCRIPT"])
+
+
+def is_managed_hook(command, expected_app):
+    try:
+        tokens = shlex.split(str(command))
+    except ValueError:
+        return False
+    return (
+        len(tokens) == 3
+        and tokens[0] == "sh"
+        and os.path.normpath(tokens[1]) == norm_hook_script
+        and tokens[2] == expected_app
+    )
+
+
+for app, settings_path in [
+    ("claude", os.path.join(os.environ["CLAUDE_DIR"], "settings.json")),
+    ("droid", os.path.join(os.environ["FACTORY_DIR"], "settings.json")),
 ]:
     if not os.path.isfile(settings_path):
         continue
-    with open(settings_path, encoding="utf-8") as f:
-        data = json.load(f)
-    hooks = data.get("hooks") if isinstance(data, dict) else None
+    try:
+        with open(settings_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        print(
+            f"Warning: skipped {settings_path} (invalid JSON); remove any rex-durable hook entry manually",
+            file=sys.stderr,
+        )
+        continue
+    if not isinstance(data, dict):
+        print(
+            f"Warning: skipped {settings_path} (not a JSON object); remove any rex-durable hook entry manually",
+            file=sys.stderr,
+        )
+        continue
+    hooks = data.get("hooks")
     session_start = hooks.get("SessionStart") if isinstance(hooks, dict) else None
     if not isinstance(session_start, list):
         continue
@@ -67,7 +98,7 @@ for settings_path in [
             continue
         kept = [
             h for h in entry["hooks"]
-            if not (isinstance(h, dict) and "rex-durable-hook.sh" in str(h.get("command", "")))
+            if not (isinstance(h, dict) and is_managed_hook(h.get("command", ""), app))
         ]
         if len(kept) != len(entry["hooks"]):
             changed = True
@@ -83,11 +114,40 @@ for settings_path in [
             f.write("\n")
         shutil.copymode(settings_path, tmp)
         os.replace(tmp, settings_path)
+
+cursor_hooks_path = os.path.join(os.environ["CURSOR_DIR"], "hooks.json")
+if os.path.isfile(cursor_hooks_path):
+    try:
+        with open(cursor_hooks_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = None
+    if not isinstance(data, dict):
+        print(
+            f"Warning: skipped {cursor_hooks_path} (invalid JSON or not a JSON object); remove any rex-durable hook entry manually",
+            file=sys.stderr,
+        )
+    else:
+        hooks = data.get("hooks")
+        session_start = hooks.get("sessionStart") if isinstance(hooks, dict) else None
+        if isinstance(session_start, list):
+            cleaned = [
+                entry for entry in session_start
+                if not (isinstance(entry, dict) and is_managed_hook(entry.get("command", ""), "cursor-agent"))
+            ]
+            if len(cleaned) != len(session_start):
+                hooks["sessionStart"] = cleaned
+                tmp = cursor_hooks_path + ".rex-durable.tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                    f.write("\n")
+                shutil.copymode(cursor_hooks_path, tmp)
+                os.replace(tmp, cursor_hooks_path)
 PY
 fi
 
 rm -f "$data/durable.lua" "$data/rex-durable-hook.sh" "$config/rex_durable.lua" "$pi_agent_dir/extensions/rex-durable.ts"
-rm -rf "$HOME/.agents/skills/rex-durable" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/rex-durable" "$HOME/.factory/skills/rex-durable"
+rm -rf "$HOME/.agents/skills/rex-durable" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/rex-durable" "$HOME/.factory/skills/rex-durable" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/skills/rex-durable"
 
 if [ "$purge" = 1 ]; then
   rm -rf "$data" "$state"
