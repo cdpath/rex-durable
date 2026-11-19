@@ -2,7 +2,7 @@
 -- agy), a generic program, and a plain shell.
 -- Run by test/e2e.sh as: rex do test/e2e_setup.lua bin=DIR dir=DIR
 
-local bin, dir = rex.args.bin, rex.args.dir
+local bin, dir, other = rex.args.bin, rex.args.dir, rex.args.other
 local SHELL = "com.superlogical.terminal.shell"
 
 local function q(word) return "'" .. word:gsub("'", "'\\''") .. "'" end
@@ -24,6 +24,10 @@ assert(rex.call("session.create", { label = "work", initial_windows = {
     before = tab(q(bin .. "/pi") .. " --model zhipu/glm-5.3 --thinking max"),
     after = tab(q(bin .. "/agy") .. " --effort high --conversation 22222222-3333-4444-8555-666666666666") } } },
   { layout = tab(q(bin .. "/droid") .. " resume --auto high") }, -- interactive droid resume, found via ~/.factory/sessions
+  { layout = { split = { direction = "horizontal", ratio = 0.5,
+    before = tab(q(bin .. "/cursor-agent") .. " --model opus"),
+    after = tab(q(bin .. "/agent") .. " --yolo --api-key secret123") } } },
+  { layout = tab(q(other .. "/agent") .. " --port 8080") },
 } }))
 assert(rex.call("session.create", { label = "side", initial_windows = {
   { layout = tab(q(bin .. "/fx") .. " --resume FXB") },

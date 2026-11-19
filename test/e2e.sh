@@ -20,7 +20,7 @@ fi
 
 T=$(cd "$(mktemp -d /tmp/rex-durable-e2e.XXXXXX)" && pwd -P)
 H=$T/home
-mkdir -p "$H" "$T/bin" "$T/state" "$T/durable" "$T/config" "$T/my proj"
+mkdir -p "$H" "$T/bin" "$T/other" "$T/share/cursor-agent/versions/2026.05" "$T/state" "$T/durable" "$T/config" "$T/my proj"
 : >"$T/config/init.lua"
 SOCK="unix://$T/rex.sock"
 passed=0
@@ -75,7 +75,7 @@ stop_watcher() {
 cleanup() {
   stop_watcher
   stop_server
-  for p in $(pgrep -f "^$T/bin/" || true); do kill "$p" 2>/dev/null || true; done
+  for p in $(pgrep -f "^$T/(bin|other|share)/" || true); do kill "$p" 2>/dev/null || true; done
   if [ "$failed" -gt 0 ] || [ "${KEEP:-0}" = 1 ]; then
     echo "Kept the test folder for a look: $T"
   else
@@ -95,9 +95,21 @@ has_line() { printf '%s\n' "$listing" | grep -E -q -- "$1"; }
 lacks_line() { ! has_line "$1"; }
 block() { printf '%s\n' "$1" | awk -v s="$2" -v tab="$3" '$1 == s && $2 == tab { print $NF }'; }
 
-for app in fx claude codex pi agy droid; do
+for app in fx claude codex pi agy droid cursor-agent; do
   cc -O0 -o "$T/bin/$app" -DAPP="\"$app\"" -DFAKE_HOME="\"$H\"" "$here/test/fake.c"
 done
+cp "$T/bin/cursor-agent" "$T/share/cursor-agent/versions/2026.05/node"
+: >"$T/share/cursor-agent/versions/2026.05/index.js"
+cat >"$T/bin/agent" <<EOF
+#!/bin/bash
+exec -a "\$0" "$T/share/cursor-agent/versions/2026.05/node" --use-system-ca "$T/share/cursor-agent/versions/2026.05/index.js" "\$@"
+EOF
+chmod +x "$T/bin/agent"
+cat >"$T/other_agent.c" <<'EOF'
+#include <unistd.h>
+int main(void) { for (;;) pause(); }
+EOF
+cc -O0 -o "$T/other/agent" "$T/other_agent.c"
 CODEX_ID=11111111-2222-4333-8444-555555555555
 AGY_ID=22222222-3333-4444-8555-666666666666
 
@@ -108,7 +120,7 @@ if "$here/test/hook.sh" >"$T/hook.log" 2>&1; then ok "SessionStart hook: $(tail 
 if [ "${1:-}" = "--unit" ]; then echo; echo "$passed passed, $failed failed"; [ "$failed" = 0 ]; exit; fi
 
 echo "1. Save what runs in each tab (including custom labels, focus & zoom)"
-R do "$here/test/e2e_setup.lua" "bin=$T/bin" "dir=$T/my proj" >/dev/null
+R do "$here/test/e2e_setup.lua" "bin=$T/bin" "dir=$T/my proj" "other=$T/other" >/dev/null
 sleep 3
 D mode=save
 listing=$(show)
@@ -130,6 +142,10 @@ expect "a plain shell" has_line '^work 4\.1 shell '
 expect "new pi chat from its newest session file" has_line '^work 6\.1 chat pi 00000000-0000-4000-8000-'
 expect "agy chat from its open brain directory" has_line "^work 6\.2 chat agy $AGY_ID "
 expect "droid interactive resume resolved from ~/.factory/sessions" has_line '^work 7\.1 chat droid 00000000-0000-4000-8000-'
+expect "cursor-agent chat from its open store.db" has_line '^work 8\.1 chat cursor-agent 00000000-0000-4000-8000-'
+expect "agent wrapper detected as cursor-agent chat" has_line '^work 8\.2 chat cursor-agent 00000000-0000-4000-8000-'
+expect "unrelated agent binary saved as program" has_line "^work 9\.1 program - .*agent --port 8080 "
+expect "snapshot strips --api-key secret from cursor-agent argv" sh -c "! grep -q 'secret123' '$T/durable/snapshots'/*.json"
 expect "a second session" has_line '^side 1\.1 chat fx FXB '
 WORK_SID=$(R ls --json | tr ',' '\n' | awk -F'"' '/session_id/{print $4; exit}')
 expect "durable save leaves zero attached session clients" \
@@ -138,6 +154,8 @@ before=$listing
 CLAUDE_ID=$(printf '%s\n' "$listing" | awk '$1 == "work" && $2 == "2.1" { print $5 }')
 PI_ID=$(printf '%s\n' "$listing" | awk '$1 == "work" && $2 == "6.1" { print $5 }')
 DROID_ID=$(printf '%s\n' "$listing" | awk '$1 == "work" && $2 == "7.1" { print $5 }')
+CURSOR_ID=$(printf '%s\n' "$listing" | awk '$1 == "work" && $2 == "8.1" { print $5 }')
+AGENT_ID=$(printf '%s\n' "$listing" | awk '$1 == "work" && $2 == "8.2" { print $5 }')
 
 echo "2. Restart: Rex brings back the tabs, rex-durable the programs"
 stop_server
@@ -168,6 +186,13 @@ expect "agy chat saved in the same split pane" has_line "^work 6\.2 chat agy $AG
 expect "droid chat reopened with --resume and kept --auto flag" \
   test "$(running "$T/bin/droid --auto high --resume $DROID_ID")" = 1
 expect "droid chat saved in its tab" has_line "^work 7\.1 chat droid $DROID_ID "
+expect "cursor-agent chat reopened with kept --model flag" \
+  test "$(running "$T/bin/cursor-agent --model opus --resume $CURSOR_ID")" = 1
+expect "cursor-agent chat saved in its split pane" has_line "^work 8\.1 chat cursor-agent $CURSOR_ID "
+expect "agent wrapper reopened via agent alias with kept --yolo flag" \
+  test "$(running "$T/bin/agent --use-system-ca $T/share/cursor-agent/versions/2026.05/index.js --yolo --resume $AGENT_ID")" = 1
+expect "agent wrapper chat saved in its split pane" has_line "^work 8\.2 chat cursor-agent $AGENT_ID "
+expect "unrelated agent binary typed, not run" test "$(running "$T/other/agent --port 8080")" = 0
 expect "a busy tab was waited for" grep -q 'trying again' "$T/startup.log"
 expect "second session's chat reopened once its tab was free" has_line '^side 1\.1 chat fx FXB '
 expect "program typed, not run" test "$(running "sleep 4242")" = 0
@@ -184,6 +209,7 @@ expect "no second copy of fx" test "$(running "$T/bin/fx --resume FXA")" = 1
 expect "no second claude" test "$(running "$T/bin/claude --resume $CLAUDE_ID")" = 1
 expect "no second pi" test "$(running "$T/bin/pi --model zhipu/glm-5.3 --thinking max --session $PI_ID")" = 1
 expect "no second agy" test "$(running "$T/bin/agy --effort high --conversation $AGY_ID")" = 1
+expect "no second cursor-agent" test "$(running "$T/bin/cursor-agent --model opus --resume $CURSOR_ID")" = 1
 expect "nothing typed the second time" sh -c "! grep -q ' type ' '$T/startup2.log'"
 
 echo "4. Empty server: rex-durable rebuilds sessions with rex.layout.*, labels, focus & zoom"
@@ -199,6 +225,8 @@ expect "work session rebuilt with its fx chat" has_line '^work 1\.1 chat fx FXA 
 expect "codex split rebuilt" has_line "^work 1\.2 chat codex $CODEX_ID "
 expect "pi split rebuilt" has_line "^work 6\.1 chat pi $PI_ID "
 expect "agy split rebuilt" has_line "^work 6\.2 chat agy $AGY_ID "
+expect "cursor-agent split rebuilt" has_line "^work 8\.1 chat cursor-agent $CURSOR_ID "
+expect "agent wrapper split rebuilt" has_line "^work 8\.2 chat cursor-agent $AGENT_ID "
 NEW_AGY_BLK=$(block "$listing" work 6.2)
 expect "custom block label preserved on rebuild" \
   test "$(R do -s work -e "return rex.session.describe_block{ block_id = '$NEW_AGY_BLK' }.block.label")" = '"agy-agent"'
@@ -253,6 +281,8 @@ expect "claude chat back" has_line "^work 2\.1 chat claude $CLAUDE_ID "
 expect "real-time FX_LIVE chat also reopened" has_line '^work 4\.1 chat fx FX_LIVE '
 expect "pi chat back" has_line "^work 6\.1 chat pi $PI_ID "
 expect "agy chat back" has_line "^work 6\.2 chat agy $AGY_ID "
+expect "cursor-agent chat back" has_line "^work 8\.1 chat cursor-agent $CURSOR_ID "
+expect "agent wrapper chat back" has_line "^work 8\.2 chat cursor-agent $AGENT_ID "
 expect "side session's chat back" has_line '^side 1\.1 chat fx FXB '
 expect "one copy of each chat" test "$(running "$T/bin/fx --resume FXA")" = 1
 rm -f "$T/supervise"
@@ -266,7 +296,7 @@ printf 'require("rex_durable")\n' >"$T/config/init.lua"
 expect "rex config check passes" sh -c "'$REX' config check '$T/config/init.lua' >'$T/check.log' 2>&1"
 R config reload >/dev/null
 expect "rex do durable_status returns structured JSON" \
-  sh -c "'$REX' --autostart=false -S '$SOCK' do durable_status | grep -q '\"version\":\"0.5.0\"'"
+  sh -c "'$REX' --autostart=false -S '$SOCK' do durable_status | grep -q '\"version\":\"0.6.0\"'"
 expect "rex do durable_status rejects undeclared arguments" \
   sh -c "! '$REX' --autostart=false -S '$SOCK' do durable_status bogus=1 >/dev/null 2>&1"
 expect "rex do durable_reopen rejects undeclared arguments via Rex args schema" \
@@ -304,6 +334,8 @@ expect "repair brings back the codex split" has_line "^work 1\.2 chat codex $COD
 expect "repair brings back the claude chat" has_line "^work 2\.1 chat claude $CLAUDE_ID "
 expect "repair brings back the pi split" has_line "^work 6\.1 chat pi $PI_ID "
 expect "repair brings back the agy split" has_line "^work 6\.2 chat agy $AGY_ID "
+expect "repair brings back the cursor-agent split" has_line "^work 8\.1 chat cursor-agent $CURSOR_ID "
+expect "repair brings back the agent wrapper split" has_line "^work 8\.2 chat cursor-agent $AGENT_ID "
 expect "repair brings back every pane" test "$(printf '%s\n' "$listing" | grep -c '^work ')" = "$before_panes"
 expect "repair opens each chat once" test "$(running "$T/bin/fx --resume FXA")" = 1
 expect "the fx subagent's chat was not touched" test "$(running "$T/bin/fx --resume FXP --child SUBC1")" = 1
