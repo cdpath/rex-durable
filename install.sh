@@ -109,9 +109,12 @@ if [ "$install_hooks" = 1 ] && [ -f "$here/hooks/rex-durable-hook.sh" ]; then
     HOOK_SCRIPT="$hook_script" CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" FACTORY_DIR="$HOME/.factory" CURSOR_DIR="${CURSOR_CONFIG_DIR:-$HOME/.cursor}" python3 - <<'PY'
 import json
 import os
+import shlex
 import shutil
+import sys
 
 hook_script = os.environ["HOOK_SCRIPT"]
+quoted_hook_script = shlex.quote(hook_script)
 targets = [
     ("claude", os.path.join(os.environ["CLAUDE_DIR"], "settings.json")),
     ("droid", os.path.join(os.environ["FACTORY_DIR"], "settings.json")),
@@ -137,7 +140,7 @@ for app, settings_path in targets:
     if not isinstance(session_start, list):
         continue
 
-    cmd = f"sh '{hook_script}' {app}"
+    cmd = f"sh {quoted_hook_script} {app}"
     cleaned = []
     for entry in session_start:
         if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
@@ -182,26 +185,35 @@ if cursor_dir and os.path.isdir(cursor_dir):
                 data = json.load(f)
         except Exception:
             data = None
-    if isinstance(data, dict):
+    if not isinstance(data, dict):
+        print(
+            f"Warning: skipped {cursor_hooks_path} (invalid JSON or not a JSON object); fix it and re-run install.sh",
+            file=sys.stderr,
+        )
+    else:
         data.setdefault("version", 1)
         hooks = data.setdefault("hooks", {})
-        if isinstance(hooks, dict):
-            session_start = hooks.setdefault("sessionStart", [])
-            if isinstance(session_start, list):
-                cleaned = [
-                    entry for entry in session_start
-                    if not (isinstance(entry, dict) and "rex-durable-hook.sh" in str(entry.get("command", "")))
-                ]
-                cleaned.append({"command": f"sh '{hook_script}' cursor-agent"})
-                hooks["sessionStart"] = cleaned
-                tmp = cursor_hooks_path + ".rex-durable.tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2)
-                    f.write("\n")
-                if os.path.isfile(cursor_hooks_path):
-                    shutil.copymode(cursor_hooks_path, tmp)
-                os.replace(tmp, cursor_hooks_path)
-                print(f"Registered sessionStart hook for cursor-agent in {cursor_hooks_path}")
+        session_start = hooks.setdefault("sessionStart", []) if isinstance(hooks, dict) else None
+        if not isinstance(session_start, list):
+            print(
+                f"Warning: skipped {cursor_hooks_path} (unexpected hooks.sessionStart format); fix it and re-run install.sh",
+                file=sys.stderr,
+            )
+        else:
+            cleaned = [
+                entry for entry in session_start
+                if not (isinstance(entry, dict) and "rex-durable-hook.sh" in str(entry.get("command", "")))
+            ]
+            cleaned.append({"command": f"sh {quoted_hook_script} cursor-agent"})
+            hooks["sessionStart"] = cleaned
+            tmp = cursor_hooks_path + ".rex-durable.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+            if os.path.isfile(cursor_hooks_path):
+                shutil.copymode(cursor_hooks_path, tmp)
+            os.replace(tmp, cursor_hooks_path)
+            print(f"Registered sessionStart hook for cursor-agent in {cursor_hooks_path}")
 PY
   fi
 fi

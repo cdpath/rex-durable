@@ -90,7 +90,7 @@ rex.action{
   title       = "Durable: Pin a Checkpoint of Open Programs",
   description = "Save a named checkpoint that automatic snapshots will never overwrite.",
   category    = CATEGORY,
-  keywords    = "durable checkpoint pin backup sessions programs chats pi agy cursor cursor-agent agent",
+  keywords    = "durable checkpoint pin backup sessions programs chats pi agy droid cursor cursor-agent agent",
   args        = { name = "string?" },
   run         = function(ctx, a)
     return run_sync("checkpoint", a, { "name" }, is_interactive(ctx))
@@ -119,7 +119,7 @@ rex.action{
   title       = "Durable: Repair Missing Tabs",
   description = "Recreate tabs and sessions that closed while the Rex server stayed running, and resume their chats.",
   category    = CATEGORY,
-  keywords    = "durable repair restore missing closed tabs sessions chats pi agy cursor cursor-agent agent",
+  keywords    = "durable repair restore missing closed tabs sessions chats pi agy droid cursor cursor-agent agent",
   args        = { dry_run = "boolean?", from = "string?", programs = "boolean?" },
   run         = function(ctx, a)
     local keys = { "dry_run", "from", "programs" }
@@ -136,7 +136,7 @@ rex.action{
   title       = "Durable: Rebuild Saved Sessions",
   description = "Recreate saved sessions, splits, labels, and agent chats on an empty (or existing, with yes=true) Rex server.",
   category    = CATEGORY,
-  keywords    = "durable rebuild recreate sessions layout chats pi agy cursor cursor-agent agent",
+  keywords    = "durable rebuild recreate sessions layout chats pi agy droid cursor cursor-agent agent",
   args        = { from = "string?", programs = "boolean?", yes = "boolean?" },
   run         = function(ctx, a)
     local keys = { "from", "programs", "yes" }

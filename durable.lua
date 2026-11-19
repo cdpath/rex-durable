@@ -113,7 +113,6 @@ M.CHATS = {
       ["--model"] = true, ["--mode"] = true, ["--sandbox"] = true,
       ["--workspace"] = true, ["--add-dir"] = true, ["--plugin-dir"] = true,
       ["--worktree-base"] = true, ["-e"] = true, ["--endpoint"] = true,
-      ["-H"] = true, ["--header"] = true,
     },
     optional_values = {
       ["-w"] = true, ["--worktree"] = true,
@@ -134,7 +133,7 @@ M.CHATS = {
       about = true, update = true, ["create-chat"] = true, ls = true, help = true,
     },
     secret_values = {
-      ["--api-key"] = true,
+      ["--api-key"] = true, ["-H"] = true, ["--header"] = true,
     },
   },
 }
@@ -754,6 +753,7 @@ local function is_non_chat_cursor_argv(argv)
   local non_chat_flags = spec.non_chat_flags or {}
   local non_chat_subcommands = spec.non_chat_subcommands or {}
   local values = spec.values or {}
+  local secret_values = spec.secret_values or {}
   local optional_values = spec.optional_values or {}
   local i = cursor_args_start(argv)
   local saw_positional = false
@@ -762,7 +762,7 @@ local function is_non_chat_cursor_argv(argv)
     if a == "--" then break end
     local name = a:match("^(%-%-?[%w%-]+)=") or a
     if non_chat_flags[name] then return true end
-    if values[name] then
+    if values[name] or secret_values[name] then
       i = i + (a == name and 2 or 1)
     elseif optional_values[name] then
       if a == name and optional_value_arg(argv[i + 1]) then
@@ -803,6 +803,7 @@ function M.argv_session(app, argv)
   if app == "cursor-agent" then
     local spec = M.CHATS["cursor-agent"]
     local values = spec.values or {}
+    local secret_values = spec.secret_values or {}
     local optional_values = spec.optional_values or {}
     local i = cursor_args_start(argv)
     local saw_resume = false
@@ -822,7 +823,7 @@ function M.argv_session(app, argv)
         i = i + 1
       elseif saw_resume and a:match("^" .. UUID .. "$") then
         return a
-      elseif values[name] then
+      elseif values[name] or secret_values[name] then
         i = i + (a == name and 2 or 1)
       elseif optional_values[name] then
         if a == name and optional_value_arg(b) then

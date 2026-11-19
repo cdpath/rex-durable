@@ -53,8 +53,11 @@ for settings_path in [
 ]:
     if not os.path.isfile(settings_path):
         continue
-    with open(settings_path, encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(settings_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        continue
     hooks = data.get("hooks") if isinstance(data, dict) else None
     session_start = hooks.get("SessionStart") if isinstance(hooks, dict) else None
     if not isinstance(session_start, list):
@@ -86,8 +89,11 @@ for settings_path in [
 
 cursor_hooks_path = os.path.join(os.environ["CURSOR_DIR"], "hooks.json")
 if os.path.isfile(cursor_hooks_path):
-    with open(cursor_hooks_path, encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(cursor_hooks_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = None
     hooks = data.get("hooks") if isinstance(data, dict) else None
     session_start = hooks.get("sessionStart") if isinstance(hooks, dict) else None
     if isinstance(session_start, list):

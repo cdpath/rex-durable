@@ -280,9 +280,10 @@ check("droid resume keeps --auto and --use-spec, drops bare resume subcmd",
   cmd({ app = "droid", id = droid_id,
         argv = { "droid", "resume", "--auto", "high", "--use-spec" } }),
   "droid --auto high --use-spec --resume " .. droid_id)
-check("cursor-agent preserves agent alias and kept options",
+check("cursor-agent preserves agent alias and kept options, strips secrets",
   cmd({ app = "cursor-agent", id = cur_id,
-        argv = { "agent", "--model", "opus", "--yolo", "--api-key", "secret123" } }),
+        argv = { "agent", "--model", "opus", "--yolo", "--api-key", "secret123",
+                 "-H", "Authorization: Bearer tok", "--header=X-Token: abc" } }),
   "agent --model opus --yolo --resume " .. cur_id)
 check("cursor-agent missing path preserves basename alias",
   cmd({ app = "cursor-agent", id = cur_id,
@@ -346,10 +347,10 @@ local cur_wrap_desc = M.describe({
   foreground = { pid = 90000021, name = "agent", cwd = "/w" },
   ancestors = { { pid = 90000002, name = "zsh", cwd = "/w" } },
 }, {
-  ps = { [90000021] = { age = 10, args = "agent --use-system-ca /opt/cursor-agent/versions/1/index.js --api-key=secret --workspace /tmp/worker" } },
+  ps = { [90000021] = { age = 10, args = "agent --use-system-ca /opt/cursor-agent/versions/1/index.js --api-key=secret -H Authorization:Bearer --header=X-Auth:tok --workspace /tmp/worker" } },
   files = { [90000021] = { cur_base .. cur_id .. "/store.db" } }, now = os.time(),
 })
-check("cursor-agent wrapper strips internal args and --workspace /tmp/worker stays a chat",
+check("cursor-agent wrapper strips internal args and secrets while --workspace /tmp/worker stays a chat",
   { cur_wrap_desc.kind, cur_wrap_desc.app, cur_wrap_desc.id, cur_wrap_desc.argv },
   { "chat", "cursor-agent", cur_id, { "agent", "--workspace", "/tmp/worker" } })
 
