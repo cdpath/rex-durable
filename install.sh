@@ -114,7 +114,21 @@ import shutil
 import sys
 
 hook_script = os.environ["HOOK_SCRIPT"]
+norm_hook_script = os.path.normpath(hook_script)
 quoted_hook_script = shlex.quote(hook_script)
+
+
+def is_managed_hook(command, expected_app):
+    try:
+        tokens = shlex.split(str(command))
+    except ValueError:
+        return False
+    return (
+        len(tokens) == 3
+        and tokens[0] == "sh"
+        and os.path.normpath(tokens[1]) == norm_hook_script
+        and tokens[2] == expected_app
+    )
 targets = [
     ("claude", os.path.join(os.environ["CLAUDE_DIR"], "settings.json")),
     ("droid", os.path.join(os.environ["FACTORY_DIR"], "settings.json")),
@@ -148,7 +162,7 @@ for app, settings_path in targets:
             continue
         kept = [
             h for h in entry["hooks"]
-            if not (isinstance(h, dict) and "rex-durable-hook.sh" in str(h.get("command", "")))
+            if not (isinstance(h, dict) and is_managed_hook(h.get("command", ""), app))
         ]
         if kept:
             new_entry = dict(entry)
@@ -202,7 +216,7 @@ if cursor_dir and os.path.isdir(cursor_dir):
         else:
             cleaned = [
                 entry for entry in session_start
-                if not (isinstance(entry, dict) and "rex-durable-hook.sh" in str(entry.get("command", "")))
+                if not (isinstance(entry, dict) and is_managed_hook(entry.get("command", ""), "cursor-agent"))
             ]
             cleaned.append({"command": f"sh {quoted_hook_script} cursor-agent"})
             hooks["sessionStart"] = cleaned
