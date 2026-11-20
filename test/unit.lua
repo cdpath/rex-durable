@@ -9,7 +9,7 @@ local here = rex.args.root or (debug.getinfo(1, "S").source:match("^@(.*)/test/[
 local M = dofile(here .. "/durable.lua")
 local HOME = os.getenv("HOME")
 
-local passed, failed = 0, 0
+local stats = { passed = 0, failed = 0 }
 
 local function show(v)
   if type(v) == "table" then return rex.json.encode(v) end
@@ -18,9 +18,9 @@ end
 
 local function check(name, got, want)
   if show(got) == show(want) then
-    passed = passed + 1
+    stats.passed = stats.passed + 1
   else
-    failed = failed + 1
+    stats.failed = stats.failed + 1
     print("FAIL " .. name .. "\n  got:  " .. show(got) .. "\n  want: " .. show(want))
   end
 end
@@ -643,7 +643,21 @@ local p_empty, rem_empty = M.pop_closed_tab(1004, stack_file)
 check("pop_closed_tab: sequential pops drain stack cleanly",
   { p_top.window_id, p_mid.window_id, p_bot.window_id, p_empty, rem_empty },
   { "w2", "w3", "w1", nil, 0 })
+
+-- Lock timeout errors instead of proceeding unlocked, and leaves existing stack untouched
+M.append_closed_tabs({ { kind = "window", window_id = "w_locked", closed_ts = os.time() } }, os.time(), stack_file)
+rex.exec({ "mkdir", stack_file .. ".lock" })
+local ts_f = assert(io.open(stack_file .. ".lock/ts", "wb"))
+ts_f:write(tostring(os.time()))
+ts_f:close()
+local lock_ok, lock_err = pcall(M.pop_closed_tab, os.time(), stack_file, 0)
+check("pop_closed_tab: errors when lock cannot be acquired in time",
+  { lock_ok, tostring(lock_err):find("timed out waiting for closed_tabs lock", 1, true) ~= nil },
+  { false, true })
+rex.exec({ "rm", "-rf", stack_file .. ".lock" })
+local after_unlock = M.pop_closed_tab(os.time(), stack_file, 0)
+check("pop_closed_tab: stack intact after failed lock attempt", after_unlock.window_id, "w_locked")
 rex.exec({ "rm", "-rf", lock_dir })
 
-print(string.format("%d passed, %d failed", passed, failed))
-if failed > 0 then rex.stop(1) end
+print(string.format("%d passed, %d failed", stats.passed, stats.failed))
+if stats.failed > 0 then rex.stop(1) end

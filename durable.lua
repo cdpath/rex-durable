@@ -1483,10 +1483,10 @@ local function read_closed_tabs(path)
   return type(data) == "table" and data or {}
 end
 
-local function with_closed_tabs_lock(fn, path)
+local function with_closed_tabs_lock(fn, path, wait_seconds)
   local lockdir = (path or CLOSED_TABS_FILE) .. ".lock"
   local acquired = false
-  local deadline = os.time() + CLOSED_TABS_LOCK_WAIT
+  local deadline = os.time() + (wait_seconds or CLOSED_TABS_LOCK_WAIT)
   while true do
     local r = run({ "mkdir", lockdir })
     if r and r.ok then
@@ -1499,7 +1499,7 @@ local function with_closed_tabs_lock(fn, path)
     if ts and (os.time() - ts) > CLOSED_TABS_LOCK_TTL then
       run({ "rm", "-rf", lockdir })
     elseif os.time() >= deadline then
-      break
+      error("timed out waiting for closed_tabs lock: " .. lockdir, 0)
     else
       rex.sleep(0.05)
     end
@@ -1533,7 +1533,7 @@ function M.prune_closed_tabs(entries, now, max_items, max_age)
   return kept
 end
 
-function M.append_closed_tabs(entries, now, path)
+function M.append_closed_tabs(entries, now, path, wait_seconds)
   if #list(entries) == 0 then return end
   local target = path or CLOSED_TABS_FILE
   return with_closed_tabs_lock(function()
@@ -1544,10 +1544,10 @@ function M.append_closed_tabs(entries, now, path)
     local pruned = M.prune_closed_tabs(stack, now)
     write_json(target, pruned)
     return #pruned
-  end, target)
+  end, target, wait_seconds)
 end
 
-function M.pop_closed_tab(now, path)
+function M.pop_closed_tab(now, path, wait_seconds)
   local target = path or CLOSED_TABS_FILE
   return with_closed_tabs_lock(function()
     local raw = read_closed_tabs(target)
@@ -1559,7 +1559,7 @@ function M.pop_closed_tab(now, path)
     local entry = table.remove(stack)
     write_json(target, stack)
     return entry, #stack
-  end, target)
+  end, target, wait_seconds)
 end
 
 function M.push_closed_tab(entry, now, path)
@@ -1649,7 +1649,8 @@ end
 local function record_closed_tabs(before, snap, now, path)
   local newly_closed = M.diff_closed(before, snap, now)
   if #newly_closed == 0 then return end
-  M.append_closed_tabs(newly_closed, now, path)
+  local ok, err = pcall(M.append_closed_tabs, newly_closed, now, path)
+  if not ok then log("couldn't record closed tabs: " .. tostring(err), "warn") end
 end
 
 local function save()
