@@ -26,7 +26,7 @@ Unlike polling/shell-heavy approaches, `rex-durable` is designed specifically ar
 - **Zero `client_connected` noise (`session.attach_all`)**: Uses `session.attach_all` instead of per-session `session.attach`, so `rex-durable` never pollutes `session.list_clients` or emits spurious client join/leave events.
 - **Native `com.superlogical.terminal.process` & `modes` inspection**: Uses Rex's kernel-resolved `script`, `invoked_path`, and `argv0` fields to identify Node/Bun agent wrappers, skips remote `host_id` blocks, and checks `com.superlogical.terminal.modes` (`screen ~= "alternate"`) before typing into any pane.
 - **Full layout fidelity via `rex.layout.*`**: Rebuilds splits with `rex.layout.horizontal` / `rex.layout.vertical` / `rex.layout.block`, preserving window focus (`w.focused_block_id`), zoomed panes (`w.zoomed_block_id`), and custom block labels (`b.label`).
-- **First-class `rex.action` commands**: Registers typed actions (`durable_status`, `durable_save`, `durable_reopen`, `durable_repair`, `durable_checkpoint`, `durable_rebuild`) with `args` validation schemas—callable from the Command Palette, keybindings (`rex.bind`), or directly via `rex do <action> [--json]`.
+- **First-class `rex.action` commands**: Registers typed actions (`durable_status`, `durable_save`, `durable_reopen`, `durable_repair`, `durable_undo_close`, `durable_checkpoint`, `durable_rebuild`) with `args` validation schemas—callable from the Command Palette, keybindings (`rex.bind`), or directly via `rex do <action> [--json]`.
 - **Native `OSC 7501` Program Status for Pi**: Since Rex doesn't yet ship a built-in hook for Pi, `extensions/rex-durable.ts` both tracks `REX_BLOCK` $\rightarrow$ `sessionId` + `process.argv` and emits spec-compliant `OSC 7501` (`app=pi`: `idle`, `working`, `blocked`, `done`) so Pi gets native Rex tab spinners and session-picker badges.
 - **`SessionStart` hook for Claude Code, Droid, and Cursor Agent**: `install.sh` registers `hooks/rex-durable-hook.sh` in `~/.claude/settings.json`, `~/.factory/settings.json`, and `~/.cursor/hooks.json` (`sessionStart`). Inside a Rex pane the hook records which session each block runs, so two agents in one folder resume on their own sessions. Outside Rex it does nothing, and it ignores subagent sessions. Pass `--no-hooks` to skip it. `uninstall.sh` removes it. Without the hook, `rex-durable` detects open Cursor Agent `store.db` files or falls back to the newest main session file in the folder (`~/.cursor/chats/<md5(cwd)>/` for Cursor Agent), and only when a single tab runs that agent there. Two tabs without open files or hooks in one folder are then saved as plain programs with no session to resume.
 
@@ -50,6 +50,8 @@ rex do durable_reopen dry_run=true            # preview what reopen would type
 rex do durable_reopen                         # resume saved chats in idle tabs
 rex do durable_repair dry_run=true            # preview missing tabs after a mass close
 rex do durable_repair                         # recreate closed tabs/sessions & resume chats
+rex do durable_undo_close dry_run=true        # preview the most recently closed tab/session
+rex do durable_undo_close                     # reopen the last closed tab/session & resume its agent
 rex do durable_rebuild from=before-update yes=true
 ```
 
@@ -57,9 +59,12 @@ You can also bind keys in `~/.config/rex/init.lua`:
 
 ```lua
 require("rex_durable")
+rex.bind("cmd+shift+t", "durable_undo_close") -- or "ctrl+b>u"
 rex.bind("ctrl+b>ctrl+s", "durable_checkpoint")
 rex.bind("ctrl+b>ctrl+r", "durable_repair")
 ```
+
+> **Note on `cmd+z` on macOS:** `rex.bind("cmd+z", "durable_undo_close")` passes `rex config check`, but interactive handling in macOS `Rex.app` (whether the app forwards `Cmd+Z` to the keymap instead of intercepting it for Edit → Undo) has not yet been verified. Prefer `cmd+shift+t` or `ctrl+b>u` unless you have tested `cmd+z` in your Rex client.
 
 ## Development & Tests
 

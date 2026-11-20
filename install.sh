@@ -334,7 +334,7 @@ init="$config/init.lua"
 if [ -f "$init" ] && grep -q 'rex_durable' "$init"; then
   "$rex" --autostart=false config reload >/dev/null 2>&1 || true
 elif [ "$add_to_config" = 1 ]; then
-  printf '\n-- rex-durable: custom actions (durable_status, durable_save, durable_reopen, durable_repair, ...)\nrequire("rex_durable")\n' >>"$init"
+  printf '\n-- rex-durable: custom actions (durable_status, durable_save, durable_reopen, durable_repair, durable_undo_close, ...)\nrequire("rex_durable")\n' >>"$init"
   "$rex" --autostart=false config reload >/dev/null 2>&1 || true
   say "Added require(\"rex_durable\") to $init"
 else

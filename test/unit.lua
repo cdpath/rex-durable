@@ -9,7 +9,7 @@ local here = rex.args.root or (debug.getinfo(1, "S").source:match("^@(.*)/test/[
 local M = dofile(here .. "/durable.lua")
 local HOME = os.getenv("HOME")
 
-local passed, failed = 0, 0
+local stats = { passed = 0, failed = 0 }
 
 local function show(v)
   if type(v) == "table" then return rex.json.encode(v) end
@@ -18,9 +18,9 @@ end
 
 local function check(name, got, want)
   if show(got) == show(want) then
-    passed = passed + 1
+    stats.passed = stats.passed + 1
   else
-    failed = failed + 1
+    stats.failed = stats.failed + 1
     print("FAIL " .. name .. "\n  got:  " .. show(got) .. "\n  want: " .. show(want))
   end
 end
@@ -497,5 +497,167 @@ check("a program still running in its tab is left alone quietly",
   { writes[1], notes }, { "b4=fx --resume C\n", { "work tab 2: the tab is busy, left alone" } })
 rex.exec = real_exec
 
-print(string.format("%d passed, %d failed", passed, failed))
-if failed > 0 then rex.stop(1) end
+-- Closed-tab diffing, pruning, and tab order restoration
+local function make_snap(instance, sessions)
+  return { server = { instance_id = instance }, sessions = sessions }
+end
+local function win(wid, pane_or_layout, label)
+  local layout = pane_or_layout.split and pane_or_layout or { pane = pane_or_layout }
+  return { window_id = wid, label = label, layout = layout }
+end
+
+local base_snap = make_snap("inst-1", {
+  { session_id = "s1", label = "work", windows = {
+    win("w1", { block_id = "b1", kind = "chat", app = "fx", id = "FX1", cwd = "/w" }),
+    win("w2", { block_id = "b2", kind = "chat", app = "claude", id = uuid, cwd = "/w" }, "claude-tab"),
+    win("w3", { block_id = "b3", kind = "chat", app = "pi", id = pi_id, cwd = "/w" }),
+  } },
+  { session_id = "s2", label = "side", windows = {
+    win("w4", { block_id = "b4", kind = "chat", app = "agy", id = agy_main, cwd = "/w" }),
+  } },
+})
+
+local one_tab_closed = make_snap("inst-1", {
+  { session_id = "s1", label = "work", windows = {
+    win("w1", { block_id = "b1", kind = "chat", app = "fx", id = "FX1", cwd = "/w" }),
+    win("w3", { block_id = "b3", kind = "chat", app = "pi", id = pi_id, cwd = "/w" }),
+  } },
+  { session_id = "s2", label = "side", windows = {
+    win("w4", { block_id = "b4", kind = "chat", app = "agy", id = agy_main, cwd = "/w" }),
+  } },
+})
+local d_one = M.diff_closed(base_snap, one_tab_closed, 1000)
+check("diff_closed: single closed tab records window, index, order, and chat id",
+  { #d_one, d_one[1].kind, d_one[1].session_id, d_one[1].window_id, d_one[1].window_index,
+    d_one[1].window_order, d_one[1].window.layout.pane.id },
+  { 1, "window", "s1", "w2", 2, { "w1", "w2", "w3" }, uuid })
+
+local whole_session_closed = make_snap("inst-1", {
+  { session_id = "s1", label = "work", windows = {
+    win("w1", { block_id = "b1", kind = "chat", app = "fx", id = "FX1", cwd = "/w" }),
+    win("w2", { block_id = "b2", kind = "chat", app = "claude", id = uuid, cwd = "/w" }, "claude-tab"),
+    win("w3", { block_id = "b3", kind = "chat", app = "pi", id = pi_id, cwd = "/w" }),
+  } },
+})
+local d_sess = M.diff_closed(base_snap, whole_session_closed, 1000)
+check("diff_closed: closing entire session records kind=session with its windows",
+  { #d_sess, d_sess[1].kind, d_sess[1].session_id, d_sess[1].session_label, #d_sess[1].session.windows,
+    d_sess[1].session.windows[1].layout.pane.id },
+  { 1, "session", "s2", "side", 1, agy_main })
+
+local restarted = make_snap("inst-2", {
+  { session_id = "s1", label = "work", windows = {
+    win("w1", { block_id = "b1", kind = "chat", app = "fx", id = "FX1", cwd = "/w" }),
+  } },
+})
+check("diff_closed: different server instance records nothing", #M.diff_closed(base_snap, restarted, 1000), 0)
+check("diff_closed: nil before records nothing", #M.diff_closed(nil, one_tab_closed, 1000), 0)
+
+local all_gone = make_snap("inst-1", {})
+check("diff_closed: all tabs disappearing at once records nothing (server exit guard)",
+  #M.diff_closed(base_snap, all_gone, 1000), 0)
+
+local big_before = make_snap("inst-1", {
+  { session_id = "s1", label = "work", windows = {
+    win("w1", { block_id = "b1", kind = "chat", app = "fx", id = "C1", cwd = "/w" }),
+    win("w2", { block_id = "b2", kind = "chat", app = "fx", id = "C2", cwd = "/w" }),
+    win("w3", { block_id = "b3", kind = "chat", app = "fx", id = "C3", cwd = "/w" }),
+    win("w4", { block_id = "b4", kind = "chat", app = "fx", id = "C4", cwd = "/w" }),
+    win("w5", { block_id = "b5", kind = "chat", app = "fx", id = "C5", cwd = "/w" }),
+  } },
+})
+local big_after = make_snap("inst-1", {
+  { session_id = "s1", label = "work", windows = {
+    win("w1", { block_id = "b1", kind = "chat", app = "fx", id = "C1", cwd = "/w" }),
+  } },
+})
+local d_big = M.diff_closed(big_before, big_after, 1000)
+check("diff_closed: big_drop still pushes all closed tabs",
+  { M.big_drop(big_before, big_after), #d_big, d_big[1].window_id, d_big[4].window_id },
+  { true, 4, "w2", "w5" })
+
+local multi_closed = make_snap("inst-1", {
+  { session_id = "s1", label = "work", windows = {
+    win("w3", { block_id = "b3", kind = "chat", app = "pi", id = pi_id, cwd = "/w" }),
+  } },
+  { session_id = "s2", label = "side", windows = {
+    win("w4", { block_id = "b4", kind = "chat", app = "agy", id = agy_main, cwd = "/w" }),
+  } },
+})
+local d_multi = M.diff_closed(base_snap, multi_closed, 1000)
+check("diff_closed: simultaneous close records all vanished tabs in order",
+  { #d_multi, d_multi[1].window_id, d_multi[2].window_id }, { 2, "w1", "w2" })
+
+check("insert_window_order: restores middle tab to original slot",
+  M.insert_window_order({ "w1", "w3", "w2_new" }, "w2_new", { "w1", "w2", "w3" }, "w2", 2),
+  { "w1", "w2_new", "w3" })
+check("insert_window_order: restores two simultaneously closed leading tabs in order",
+  M.insert_window_order({ "w2_new", "w3", "w1_new" }, "w1_new", { "w1", "w2", "w3" }, "w1", 1),
+  { "w1_new", "w2_new", "w3" })
+check("insert_window_order: respects prepended new tab when restoring middle tab",
+  M.insert_window_order({ "w0", "w1", "w3", "w2_new" }, "w2_new", { "w1", "w2", "w3" }, "w2", 2),
+  { "w0", "w1", "w2_new", "w3" })
+
+local stack = {}
+for i = 1, 25 do
+  stack[i] = { kind = "window", window_id = "w" .. i, closed_ts = 100000 + i }
+end
+stack[1].closed_ts = 100 -- expired (> 24h before 100100)
+local pruned = M.prune_closed_tabs(stack, 100100, 20, 86400)
+check("prune_closed_tabs: caps to 20 newest and drops expired entries",
+  { #pruned, pruned[1].window_id, pruned[20].window_id }, { 20, "w6", "w25" })
+local all_old = { { kind = "window", window_id = "old", closed_ts = 1000 } }
+check("prune_closed_tabs: drops entries older than 24h", #M.prune_closed_tabs(all_old, 1000 + 86401, 20, 86400), 0)
+
+local moved_pane = make_snap("inst-1", {
+  { session_id = "s1", label = "work", windows = {
+    win("w1", { split = { direction = "horizontal", ratio = 0.5,
+      before = leaf({ block_id = "b1", kind = "chat", app = "fx", id = "FX1", cwd = "/w" }),
+      after = leaf({ block_id = "b2", kind = "chat", app = "claude", id = uuid, cwd = "/w" }) } }),
+    win("w3", { block_id = "b3", kind = "chat", app = "pi", id = pi_id, cwd = "/w" }),
+  } },
+  { session_id = "s2", label = "side", windows = {
+    win("w4", { block_id = "b4", kind = "chat", app = "agy", id = agy_main, cwd = "/w" }),
+  } },
+})
+check("diff_closed: moving a tab's pane into another tab is not recorded as closed",
+  #M.diff_closed(base_snap, moved_pane, 1000), 0)
+
+local lock_dir = "/tmp/rex-durable-lock-unit-" .. tostring(os.time())
+rex.exec({ "mkdir", "-p", lock_dir })
+local stack_file = lock_dir .. "/closed_tabs.json"
+M.append_closed_tabs({
+  { kind = "window", window_id = "w1", closed_ts = 1000 },
+  { kind = "window", window_id = "w2", closed_ts = 1001 },
+}, 1002, stack_file)
+local popped1, rem1 = M.pop_closed_tab(1002, stack_file)
+check("pop_closed_tab: removes top entry immediately", { popped1.window_id, rem1 }, { "w2", 1 })
+-- Simulate watcher appending a newly closed tab while restore is in flight, then restore failing
+M.append_closed_tabs({ { kind = "window", window_id = "w3", closed_ts = 1003 } }, 1003, stack_file)
+local count_after_push = M.push_closed_tab(popped1, 1004, stack_file)
+check("push_closed_tab: restores failed entry without clobbering concurrent appends", count_after_push, 3)
+local p_top = M.pop_closed_tab(1004, stack_file)
+local p_mid = M.pop_closed_tab(1004, stack_file)
+local p_bot = M.pop_closed_tab(1004, stack_file)
+local p_empty, rem_empty = M.pop_closed_tab(1004, stack_file)
+check("pop_closed_tab: sequential pops drain stack cleanly",
+  { p_top.window_id, p_mid.window_id, p_bot.window_id, p_empty, rem_empty },
+  { "w2", "w3", "w1", nil, 0 })
+
+-- Lock timeout errors instead of proceeding unlocked, and leaves existing stack untouched
+M.append_closed_tabs({ { kind = "window", window_id = "w_locked", closed_ts = os.time() } }, os.time(), stack_file)
+rex.exec({ "mkdir", stack_file .. ".lock" })
+local ts_f = assert(io.open(stack_file .. ".lock/ts", "wb"))
+ts_f:write(tostring(os.time()))
+ts_f:close()
+local lock_ok, lock_err = pcall(M.pop_closed_tab, os.time(), stack_file, 0)
+check("pop_closed_tab: errors when lock cannot be acquired in time",
+  { lock_ok, tostring(lock_err):find("timed out waiting for closed_tabs lock", 1, true) ~= nil },
+  { false, true })
+rex.exec({ "rm", "-rf", stack_file .. ".lock" })
+local after_unlock = M.pop_closed_tab(os.time(), stack_file, 0)
+check("pop_closed_tab: stack intact after failed lock attempt", after_unlock.window_id, "w_locked")
+rex.exec({ "rm", "-rf", lock_dir })
+
+print(string.format("%d passed, %d failed", stats.passed, stats.failed))
+if stats.failed > 0 then rex.stop(1) end
