@@ -416,6 +416,31 @@ expect "droid restored once after parallel undo" \
 expect "claude back at tab 2 after parallel undo" has_line "^work 2\.1 chat claude $CLAUDE_ID "
 expect "droid back at tab 7 after parallel undo" has_line "^work 7\.1 chat droid $DROID_ID "
 
+# Rapid sequential closes under the live watcher: close higher index (tab 7) first, then lower index (tab 2) 0.4s later.
+# Undo #1 must restore tab 2 (most recently closed), and Undo #2 must restore tab 7 (earlier closed).
+rm -f "$T/durable/closed_tabs.json"
+env -u REX_SESSION -u REX_BLOCK -u REX_SERVER -u REX_CLIENT -u REX_CONFIG \
+    -u PI_CODING_AGENT_DIR -u PI_CODING_AGENT_SESSION_DIR -u REX_DURABLE_STATE_DIR HOME="$H" \
+  "$REX" --autostart=false -S "$SOCK" do "$here/durable.lua" --all mode=watch \
+  "state_dir=$T/durable" notify=false >>"$T/watch-undo.log" 2>&1 &
+watch_pid=$!
+for _ in $(seq 1 20); do
+  grep -q 'watching' "$T/watch-undo.log" && break
+  sleep 0.2
+done
+sleep 0.5
+HOME="$H" R do "$here/test/e2e_more.lua" action=close_tab label=work index=7 >/dev/null
+sleep 0.4
+HOME="$H" R do "$here/test/e2e_more.lua" action=close_tab label=work index=2 >/dev/null
+sleep 0.6
+stop_watcher
+D mode=undo_close json=true >"$T/undo-lifo-1.json"
+D mode=undo_close json=true >"$T/undo-lifo-2.json"
+expect "rapid close LIFO: first undo restores most recently closed tab (tab 2 claude)" \
+  sh -c "grep -q '\"window_index\":2' '$T/undo-lifo-1.json' && grep -q '$CLAUDE_ID' '$T/undo-lifo-1.json'"
+expect "rapid close LIFO: second undo restores earlier closed tab (tab 7 droid)" \
+  sh -c "grep -q '\"window_index\":7' '$T/undo-lifo-2.json' && grep -q '$DROID_ID' '$T/undo-lifo-2.json'"
+
 echo
 echo "$passed passed, $failed failed"
 [ "$failed" = 0 ]

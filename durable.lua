@@ -34,6 +34,7 @@ local TERMINAL = "com.superlogical.terminal"
 local SHELL_FLAVOR = "com.superlogical.terminal.shell"
 local SAVE_EVERY = 30         -- periodic safety poll in seconds while watching
 local DEBOUNCE_WAIT = 2       -- trailing debounce seconds after event bursts
+local CLOSE_DEBOUNCE_WAIT = 0.1 -- fast flush on tab/session close to preserve LIFO undo order
 local MAX_DEBOUNCE_WAIT = 8   -- max seconds to defer save during continuous events
 local KEEP_SNAPSHOTS = 10     -- saves kept, one per server instance
 local MAX_AGE_DAYS = 30       -- older saves are never restored on their own
@@ -2613,13 +2614,14 @@ end
 local function watch()
   is_all_scope = true -- `rex do --all` already bootstrapped event_scope="all"
   local instance
-  local pending, burst_started_at
+  local pending, pending_wait, burst_started_at
 
   local function cancel_pending()
     if pending then
       pending:cancel()
       pending = nil
     end
+    pending_wait = nil
     burst_started_at = nil
   end
 
@@ -2637,29 +2639,47 @@ local function watch()
     if not ok then log("watcher tick error: " .. tostring(err), "error") end
   end
 
-  local function schedule_save()
+  local function schedule_save(wait)
+    if type(wait) ~= "number" then wait = DEBOUNCE_WAIT end
     local now = os.time()
     if not burst_started_at then burst_started_at = now end
     if pending then
-      if now - burst_started_at >= MAX_DEBOUNCE_WAIT then return end
+      if pending_wait and wait > pending_wait then return end
+      if wait >= (pending_wait or DEBOUNCE_WAIT) and now - burst_started_at >= MAX_DEBOUNCE_WAIT then
+        return
+      end
       pending:cancel()
     end
-    pending = rex.after(DEBOUNCE_WAIT, tick)
+    pending_wait = wait
+    pending = rex.after(wait, tick)
+  end
+
+  local function schedule_default_save()
+    schedule_save(DEBOUNCE_WAIT)
+  end
+
+  local function schedule_close_save()
+    schedule_save(CLOSE_DEBOUNCE_WAIT)
+  end
+
+  for _, event in ipairs({
+    "session_destroyed",
+    "block_closed",
+  }) do
+    rex.on(event, schedule_close_save)
   end
 
   for _, event in ipairs({
     "session_created",
-    "session_destroyed",
     "session_label_changed",
     "session_view_changed",
     "block_created",
-    "block_closed",
     "terminal.process_changed",
     "terminal.program_status_changed",
     "terminal.pwd_changed",
     "terminal.child_exited",
   }) do
-    rex.on(event, schedule_save)
+    rex.on(event, schedule_default_save)
   end
 
   log("rex-durable " .. M.VERSION .. " watching; saves in " .. STATE_DIR)
