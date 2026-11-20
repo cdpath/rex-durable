@@ -59,12 +59,12 @@ You can also bind keys in `~/.config/rex/init.lua`:
 
 ```lua
 require("rex_durable")
-rex.bind("cmd+z", "durable_undo_close")       -- or "cmd+shift+t" if you use Cmd+Z in text fields
+rex.bind("cmd+shift+t", "durable_undo_close") -- or "ctrl+b>u"
 rex.bind("ctrl+b>ctrl+s", "durable_checkpoint")
 rex.bind("ctrl+b>ctrl+r", "durable_repair")
 ```
 
-> **Note on `cmd+z` on macOS:** `rex.bind("cmd+z", "durable_undo_close")` is accepted by Rex and stacks above client defaults, while native macOS text inputs (tab rename, command palette) still handle Undo normally. If you prefer a shortcut with zero overlap with standard macOS text editing, bind `cmd+shift+t` or `ctrl+b>u` instead.
+> **Note on `cmd+z` on macOS:** `rex.bind("cmd+z", "durable_undo_close")` passes `rex config check`, but interactive handling in macOS `Rex.app` (whether the app forwards `Cmd+Z` to the keymap instead of intercepting it for Edit → Undo) has not yet been verified. Prefer `cmd+shift+t` or `ctrl+b>u` unless you have tested `cmd+z` in your Rex client.
 
 ## Development & Tests
 

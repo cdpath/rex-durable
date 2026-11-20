@@ -48,6 +48,8 @@ local AUTO_PREFIX = "auto-before-drop-"
 local AUTO_KEEP = 10          -- automatic checkpoints kept
 local CLOSED_TABS_MAX = 20    -- recently closed tabs/sessions kept for undo
 local CLOSED_TABS_MAX_AGE = 86400 -- 24 hours in seconds
+local CLOSED_TABS_LOCK_TTL = 15   -- stale lock timeout in seconds
+local CLOSED_TABS_LOCK_WAIT = 5   -- max seconds to wait for lock
 
 local SHELLS = {
   bash = true, csh = true, dash = true, elvish = true, fish = true, ksh = true,
@@ -1481,6 +1483,33 @@ local function read_closed_tabs(path)
   return type(data) == "table" and data or {}
 end
 
+local function with_closed_tabs_lock(fn, path)
+  local lockdir = (path or CLOSED_TABS_FILE) .. ".lock"
+  local acquired = false
+  local deadline = os.time() + CLOSED_TABS_LOCK_WAIT
+  while true do
+    local r = run({ "mkdir", lockdir })
+    if r and r.ok then
+      acquired = true
+      write_file(lockdir .. "/ts", tostring(os.time()))
+      break
+    end
+    local ts = tonumber(read_file(lockdir .. "/ts") or "")
+      or (mtimes({ lockdir })[lockdir])
+    if ts and (os.time() - ts) > CLOSED_TABS_LOCK_TTL then
+      run({ "rm", "-rf", lockdir })
+    elseif os.time() >= deadline then
+      break
+    else
+      rex.sleep(0.05)
+    end
+  end
+  local ok, a, b, c = pcall(fn)
+  if acquired then run({ "rm", "-rf", lockdir }) end
+  if not ok then error(a, 0) end
+  return a, b, c
+end
+
 function M.prune_closed_tabs(entries, now, max_items, max_age)
   now = now or os.time()
   max_items = max_items or CLOSED_TABS_MAX
@@ -1504,6 +1533,40 @@ function M.prune_closed_tabs(entries, now, max_items, max_age)
   return kept
 end
 
+function M.append_closed_tabs(entries, now, path)
+  if #list(entries) == 0 then return end
+  local target = path or CLOSED_TABS_FILE
+  return with_closed_tabs_lock(function()
+    local stack = read_closed_tabs(target)
+    for _, entry in ipairs(entries) do
+      stack[#stack + 1] = entry
+    end
+    local pruned = M.prune_closed_tabs(stack, now)
+    write_json(target, pruned)
+    return #pruned
+  end, target)
+end
+
+function M.pop_closed_tab(now, path)
+  local target = path or CLOSED_TABS_FILE
+  return with_closed_tabs_lock(function()
+    local raw = read_closed_tabs(target)
+    local stack = M.prune_closed_tabs(raw, now)
+    if #stack == 0 then
+      if #raw > 0 then write_json(target, {}) end
+      return nil, 0
+    end
+    local entry = table.remove(stack)
+    write_json(target, stack)
+    return entry, #stack
+  end, target)
+end
+
+function M.push_closed_tab(entry, now, path)
+  if type(entry) ~= "table" then return 0 end
+  return M.append_closed_tabs({ entry }, now, path)
+end
+
 function M.diff_closed(before, snap, now)
   if type(before) ~= "table" or type(snap) ~= "table" then return {} end
   local bi = before.server and before.server.instance_id
@@ -1515,9 +1578,14 @@ function M.diff_closed(before, snap, now)
 
   now = now or os.time()
   local closed_at = os.date("!%Y-%m-%dT%H:%M:%SZ", now)
-  local live_sessions = {}
+  local live_sessions, live_blocks = {}, {}
   for _, s in ipairs(list(snap.sessions)) do
     if s.session_id then live_sessions[s.session_id] = s end
+    for _, w in ipairs(list(s.windows)) do
+      for _, p in ipairs(M.panes(w.layout)) do
+        if p.block_id then live_blocks[p.block_id] = true end
+      end
+    end
   end
 
   local closed = {}
@@ -1548,18 +1616,28 @@ function M.diff_closed(before, snap, now)
         end
         for wi, bw in ipairs(b_windows) do
           if bw.window_id and not live_win_ids[bw.window_id] then
-            closed[#closed + 1] = {
-              kind = "window",
-              closed_at = closed_at,
-              closed_ts = now,
-              server_instance = bi,
-              session_id = bs.session_id,
-              session_label = bs.label,
-              window_id = bw.window_id,
-              window_index = wi,
-              window_order = window_order,
-              window = bw,
-            }
+            local bw_panes = M.panes(bw.layout)
+            local all_moved = #bw_panes > 0
+            for _, p in ipairs(bw_panes) do
+              if not (p.block_id and live_blocks[p.block_id]) then
+                all_moved = false
+                break
+              end
+            end
+            if not all_moved then
+              closed[#closed + 1] = {
+                kind = "window",
+                closed_at = closed_at,
+                closed_ts = now,
+                server_instance = bi,
+                session_id = bs.session_id,
+                session_label = bs.label,
+                window_id = bw.window_id,
+                window_index = wi,
+                window_order = window_order,
+                window = bw,
+              }
+            end
           end
         end
       end
@@ -1571,12 +1649,7 @@ end
 local function record_closed_tabs(before, snap, now, path)
   local newly_closed = M.diff_closed(before, snap, now)
   if #newly_closed == 0 then return end
-  local target = path or CLOSED_TABS_FILE
-  local stack = read_closed_tabs(target)
-  for _, entry in ipairs(newly_closed) do
-    stack[#stack + 1] = entry
-  end
-  write_json(target, M.prune_closed_tabs(stack, now))
+  M.append_closed_tabs(newly_closed, now, path)
 end
 
 local function save()
@@ -2259,10 +2332,15 @@ end
 
 local function undo_close(dry_run)
   ensure_dirs()
-  local raw = read_closed_tabs()
-  local stack = M.prune_closed_tabs(raw)
-  if #stack == 0 then
-    if #raw > 0 and not dry_run then write_json(CLOSED_TABS_FILE, {}) end
+  local entry, remaining
+  if dry_run then
+    local stack = M.prune_closed_tabs(read_closed_tabs())
+    entry = stack[#stack]
+    remaining = math.max(#stack - 1, 0)
+  else
+    entry, remaining = M.pop_closed_tab()
+  end
+  if not entry then
     local msg = "No recently closed tabs to reopen."
     tell(msg)
     if JSON_MODE then
@@ -2271,8 +2349,20 @@ local function undo_close(dry_run)
     return
   end
 
-  local entry = stack[#stack]
-  local live = collect()
+  local function restore_failed(msg)
+    local count = M.push_closed_tab(entry)
+    tell(msg)
+    if JSON_MODE then
+      return { restored = false, dry_run = false, remaining = count, message = msg }
+    end
+  end
+
+  local live_ok, live_or_err = pcall(collect)
+  if not live_ok then
+    if not dry_run then M.push_closed_tab(entry) end
+    error(live_or_err, 0)
+  end
+  local live = live_or_err
   local saved_for_open = entry.kind == "session"
     and { sessions = { entry.session } }
     or { sessions = { { session_id = entry.session_id, label = entry.session_label, windows = { entry.window } } } }
@@ -2313,7 +2403,7 @@ local function undo_close(dry_run)
         chats = chats,
         skipped = skipped,
         programs = programs,
-        remaining = #stack - 1,
+        remaining = remaining,
       }
     end
     return
@@ -2324,10 +2414,7 @@ local function undo_close(dry_run)
   if entry.kind == "session" then
     local new_sid, res = rebuild_session(entry.session, open, instance_id)
     if not new_sid then
-      local msg = "Couldn't reopen closed session " .. tostring(label) .. "."
-      tell(msg)
-      if JSON_MODE then return { restored = false, dry_run = false, remaining = #stack, message = msg } end
-      return
+      return restore_failed("Couldn't reopen closed session " .. tostring(label) .. ".")
     end
     restored_session_id = new_sid
     restored_window_id = list(res and res.initial_windows)[1] and res.initial_windows[1].window_id or nil
@@ -2349,10 +2436,7 @@ local function undo_close(dry_run)
       if entry.window.label then request.window_label = entry.window.label end
       local result, err = rex.call("session.new_window", request)
       if not result then
-        local msg = "Couldn't reopen closed tab: " .. tostring(err)
-        tell(msg)
-        if JSON_MODE then return { restored = false, dry_run = false, remaining = #stack, message = msg } end
-        return
+        return restore_failed("Couldn't reopen closed tab: " .. tostring(err))
       end
       local new_writes = {}
       local focus_bid = apply_window_fidelity(
@@ -2379,18 +2463,12 @@ local function undo_close(dry_run)
       }
       local new_sid, res = rebuild_session(synth, open, instance_id)
       if not new_sid then
-        local msg = "Couldn't reopen closed tab for missing session " .. tostring(label) .. "."
-        tell(msg)
-        if JSON_MODE then return { restored = false, dry_run = false, remaining = #stack, message = msg } end
-        return
+        return restore_failed("Couldn't reopen closed tab for missing session " .. tostring(label) .. ".")
       end
       restored_session_id = new_sid
       restored_window_id = list(res and res.initial_windows)[1] and res.initial_windows[1].window_id or nil
     end
   end
-
-  table.remove(stack)
-  write_json(CLOSED_TABS_FILE, stack)
 
   local summary
   if entry.kind == "session" then
@@ -2415,7 +2493,7 @@ local function undo_close(dry_run)
       chats = chats,
       skipped = skipped,
       programs = programs,
-      remaining = #stack,
+      remaining = remaining,
     }
   end
 end

@@ -609,5 +609,41 @@ check("prune_closed_tabs: caps to 20 newest and drops expired entries",
 local all_old = { { kind = "window", window_id = "old", closed_ts = 1000 } }
 check("prune_closed_tabs: drops entries older than 24h", #M.prune_closed_tabs(all_old, 1000 + 86401, 20, 86400), 0)
 
+local moved_pane = make_snap("inst-1", {
+  { session_id = "s1", label = "work", windows = {
+    win("w1", { split = { direction = "horizontal", ratio = 0.5,
+      before = leaf({ block_id = "b1", kind = "chat", app = "fx", id = "FX1", cwd = "/w" }),
+      after = leaf({ block_id = "b2", kind = "chat", app = "claude", id = uuid, cwd = "/w" }) } }),
+    win("w3", { block_id = "b3", kind = "chat", app = "pi", id = pi_id, cwd = "/w" }),
+  } },
+  { session_id = "s2", label = "side", windows = {
+    win("w4", { block_id = "b4", kind = "chat", app = "agy", id = agy_main, cwd = "/w" }),
+  } },
+})
+check("diff_closed: moving a tab's pane into another tab is not recorded as closed",
+  #M.diff_closed(base_snap, moved_pane, 1000), 0)
+
+local lock_dir = "/tmp/rex-durable-lock-unit-" .. tostring(os.time())
+rex.exec({ "mkdir", "-p", lock_dir })
+local stack_file = lock_dir .. "/closed_tabs.json"
+M.append_closed_tabs({
+  { kind = "window", window_id = "w1", closed_ts = 1000 },
+  { kind = "window", window_id = "w2", closed_ts = 1001 },
+}, 1002, stack_file)
+local popped1, rem1 = M.pop_closed_tab(1002, stack_file)
+check("pop_closed_tab: removes top entry immediately", { popped1.window_id, rem1 }, { "w2", 1 })
+-- Simulate watcher appending a newly closed tab while restore is in flight, then restore failing
+M.append_closed_tabs({ { kind = "window", window_id = "w3", closed_ts = 1003 } }, 1003, stack_file)
+local count_after_push = M.push_closed_tab(popped1, 1004, stack_file)
+check("push_closed_tab: restores failed entry without clobbering concurrent appends", count_after_push, 3)
+local p_top = M.pop_closed_tab(1004, stack_file)
+local p_mid = M.pop_closed_tab(1004, stack_file)
+local p_bot = M.pop_closed_tab(1004, stack_file)
+local p_empty, rem_empty = M.pop_closed_tab(1004, stack_file)
+check("pop_closed_tab: sequential pops drain stack cleanly",
+  { p_top.window_id, p_mid.window_id, p_bot.window_id, p_empty, rem_empty },
+  { "w2", "w3", "w1", nil, 0 })
+rex.exec({ "rm", "-rf", lock_dir })
+
 print(string.format("%d passed, %d failed", passed, failed))
 if failed > 0 then rex.stop(1) end

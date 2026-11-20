@@ -394,6 +394,28 @@ expect "undo_close JSON reports restored session" \
 expect "side session and its fx chat restored" has_line '^side 1\.1 chat fx FXB '
 expect "fx FXB running once" test "$(running "$T/bin/fx --resume FXB")" = 1
 
+# Concurrent double-undo: close 2 tabs (tab 2 claude and tab 7 droid), save, fire two undo_close in parallel
+HOME="$H" R do "$here/test/e2e_more.lua" action=close_tab label=work index=7 >/dev/null
+HOME="$H" R do "$here/test/e2e_more.lua" action=close_tab label=work index=2 >/dev/null
+sleep 2
+D mode=save
+D mode=undo_close json=true >"$T/undo-race-1.json" &
+u1=$!
+D mode=undo_close json=true >"$T/undo-race-2.json" &
+u2=$!
+wait "$u1" "$u2"
+sleep 3
+D mode=save
+listing=$(show)
+expect "parallel undo_close restores two distinct tabs (no double restore)" \
+  sh -c "grep -q '\"restored\":true' '$T/undo-race-1.json' && grep -q '\"restored\":true' '$T/undo-race-2.json' && [ \"\$(cat '$T/undo-race-1.json')\" != \"\$(cat '$T/undo-race-2.json')\" ]"
+expect "claude restored once after parallel undo" \
+  test "$(running "$T/bin/claude --resume $CLAUDE_ID")" = 1
+expect "droid restored once after parallel undo" \
+  test "$(running "$T/bin/droid --auto high --resume $DROID_ID")" = 1
+expect "claude back at tab 2 after parallel undo" has_line "^work 2\.1 chat claude $CLAUDE_ID "
+expect "droid back at tab 7 after parallel undo" has_line "^work 7\.1 chat droid $DROID_ID "
+
 echo
 echo "$passed passed, $failed failed"
 [ "$failed" = 0 ]
