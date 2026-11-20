@@ -19,6 +19,8 @@ rex do durable_reopen dry_run=true --json        # preview what reopen would typ
 rex do durable_reopen                            # reopen saved chats in restored tabs
 rex do durable_repair dry_run=true --json        # preview missing tabs/sessions after an accidental mass close
 rex do durable_repair                            # recreate missing tabs/sessions and resume their chats
+rex do durable_undo_close dry_run=true --json    # preview the most recently closed tab or session
+rex do durable_undo_close                        # reopen the last closed tab or session and resume its agent
 rex do durable_rebuild from=before-upgrade yes=true
 ```
 

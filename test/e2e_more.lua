@@ -33,5 +33,16 @@ elseif a.action == "close" then
       end
     end
   end
+elseif a.action == "close_tab" then
+  local idx = tonumber(a.index)
+  for _, s in ipairs(rex.call("session.list").sessions or {}) do
+    if s.label == a.label then
+      rex.session.attach{ session_id = s.session_id }
+      local view = rex.session.view{ session_id = s.session_id }
+      local w = (view.windows or {})[idx]
+      assert(w, "no tab at index " .. tostring(idx))
+      rex.call("session.close_window", { session_id = s.session_id, window_id = w.window_id })
+    end
+  end
 end
 return "ok"

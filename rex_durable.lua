@@ -132,6 +132,23 @@ rex.action{
 }
 
 rex.action{
+  name        = "durable_undo_close",
+  title       = "Durable: Reopen Closed Tab",
+  description = "Reopen the most recently closed Rex tab or session and resume its coding agent conversation.",
+  category    = CATEGORY,
+  keywords    = "durable undo close reopen restore tab window session chat agent fx claude codex pi agy antigravity droid factory cursor cursor-agent",
+  args        = { dry_run = "boolean?", programs = "boolean?" },
+  run         = function(ctx, a)
+    local keys = { "dry_run", "programs" }
+    if is_interactive(ctx) and not (a and a.dry_run) then
+      run_detached("undo_close", a, keys)
+      return
+    end
+    return run_sync("undo_close", a, keys, false)
+  end,
+}
+
+rex.action{
   name        = "durable_rebuild",
   title       = "Durable: Rebuild Saved Sessions",
   description = "Recreate saved sessions, splits, labels, and agent chats on an empty (or existing, with yes=true) Rex server.",

@@ -301,6 +301,8 @@ expect "rex do durable_status rejects undeclared arguments" \
   sh -c "! '$REX' --autostart=false -S '$SOCK' do durable_status bogus=1 >/dev/null 2>&1"
 expect "rex do durable_reopen rejects undeclared arguments via Rex args schema" \
   sh -c "! '$REX' --autostart=false -S '$SOCK' do durable_reopen bogus=1 >/dev/null 2>&1"
+expect "rex do durable_undo_close rejects undeclared arguments via Rex args schema" \
+  sh -c "! '$REX' --autostart=false -S '$SOCK' do durable_undo_close bogus=1 >/dev/null 2>&1"
 
 echo "7. Subagents & many tabs closing at once while Rex keeps running"
 mkdir -p "$T/my proj/sub-droid"
@@ -343,6 +345,54 @@ D mode=repair >"$T/repair2.log"
 sleep 2
 expect "a second repair adds nothing" grep -q 'Added 0 tabs and 0 sessions' "$T/repair2.log"
 expect "still one copy of each chat" test "$(running "$T/bin/fx --resume FXA")" = 1
+
+echo "8. Undo closing a single tab and a whole session (durable_undo_close)"
+rm -f "$T/durable/closed_tabs.json"
+expect "empty undo stack reports clearly" \
+  sh -c "'$REX' --autostart=false -S '$SOCK' do '$here/durable.lua' 'state_dir=$T/durable' notify=false mode=undo_close json=true | grep -q '\"restored\":false'"
+D mode=save
+# Focus tab 1 first so we prove undo_close switches focus to restored tab 6
+R do -s work -e 'local v = rex.session.view{}; rex.session.focus_window{ window_id = v.windows[1].window_id }; return "ok"' >/dev/null
+# Close work tab 6 (horizontal split: pi + agy with custom label)
+HOME="$H" R do "$here/test/e2e_more.lua" action=close_tab label=work index=6 >/dev/null
+sleep 2
+expect "closed tab's pi and agy stopped" \
+  sh -c "[ \"\$(pgrep -f -x '$T/bin/pi --model zhipu/glm-5.3 --thinking max --session $PI_ID' | wc -l | tr -d ' ')\" = 0 ] && [ \"\$(pgrep -f -x '$T/bin/agy --effort high --conversation $AGY_ID' | wc -l | tr -d ' ')\" = 0 ]"
+D mode=save
+expect "closed tab recorded in closed_tabs.json" test -f "$T/durable/closed_tabs.json"
+D mode=undo_close dry_run=true json=true >"$T/undo-dry.json"
+expect "undo dry_run previews closed tab without reopening" \
+  sh -c "grep -q '\"kind\":\"window\"' '$T/undo-dry.json' && grep -q '\"window_index\":6' '$T/undo-dry.json' && [ \"\$(pgrep -f -x '$T/bin/agy --effort high --conversation $AGY_ID' | wc -l | tr -d ' ')\" = 0 ]"
+D mode=undo_close json=true >"$T/undo-tab.json"
+sleep 3
+D mode=save
+listing=$(show)
+expect "undo_close JSON reports restored window" grep -q '"restored":true' "$T/undo-tab.json"
+expect "pi split pane restored at original tab position 6" has_line "^work 6\.1 chat pi $PI_ID "
+expect "agy split pane restored at original tab position 6" has_line "^work 6\.2 chat agy $AGY_ID "
+expect "restored tab is focused as active window" \
+  test "$(R do -s work -e 'local v = rex.session.view{}; return (v.active_window_id == v.windows[6].window_id) and "yes" or "no"')" = '"yes"'
+UNDO_AGY_BLK=$(block "$listing" work 6.2)
+expect "custom block label preserved on undo_close" \
+  test "$(R do -s work -e "return rex.session.describe_block{ block_id = '$UNDO_AGY_BLK' }.block.label")" = '"agy-agent"'
+expect "pi resumed once with kept flags" \
+  test "$(running "$T/bin/pi --model zhipu/glm-5.3 --thinking max --session $PI_ID")" = 1
+expect "agy resumed once with kept flags" \
+  test "$(running "$T/bin/agy --effort high --conversation $AGY_ID")" = 1
+
+# Kill the entire 'side' session and undo it
+R kill side >/dev/null
+sleep 2
+expect "side session's fx chat stopped" test "$(running "$T/bin/fx --resume FXB")" = 0
+D mode=save
+D mode=undo_close json=true >"$T/undo-sess.json"
+sleep 3
+D mode=save
+listing=$(show)
+expect "undo_close JSON reports restored session" \
+  sh -c "grep -q '\"restored\":true' '$T/undo-sess.json' && grep -q '\"kind\":\"session\"' '$T/undo-sess.json'"
+expect "side session and its fx chat restored" has_line '^side 1\.1 chat fx FXB '
+expect "fx FXB running once" test "$(running "$T/bin/fx --resume FXB")" = 1
 
 echo
 echo "$passed passed, $failed failed"

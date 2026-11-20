@@ -11,8 +11,8 @@ Built with Rex native best practices:
   * Preserves window focus (`w.focused_block_id`), zoomed panes (`w.zoomed_block_id`),
     and custom block labels (`b.label`).
   * First-class `rex.action` definitions (`durable_status`, `durable_save`,
-    `durable_reopen`, `durable_repair`, `durable_checkpoint`, `durable_rebuild`)
-    with typed schemas and structured JSON results (`json=true`).
+    `durable_reopen`, `durable_repair`, `durable_undo_close`, `durable_checkpoint`,
+    `durable_rebuild`) with typed schemas and structured JSON results (`json=true`).
 
 Supported coding agents (auto-resumed on their exact conversation):
   * Antigravity CLI (`agy --conversation <id>`)
@@ -46,6 +46,8 @@ local DROP_MIN = 3            -- a big drop loses at least this many tabs or cha
 local DROP_KEEP = 0.6         -- ...and keeps at most this fraction of them
 local AUTO_PREFIX = "auto-before-drop-"
 local AUTO_KEEP = 10          -- automatic checkpoints kept
+local CLOSED_TABS_MAX = 20    -- recently closed tabs/sessions kept for undo
+local CLOSED_TABS_MAX_AGE = 86400 -- 24 hours in seconds
 
 local SHELLS = {
   bash = true, csh = true, dash = true, elvish = true, fish = true, ksh = true,
@@ -258,7 +260,9 @@ local CHECKPOINT_DIR = STATE_DIR .. "/checkpoints"
 local HISTORY_DIR = STATE_DIR .. "/history"
 local BLOCKS_DIR = STATE_DIR .. "/blocks"
 local STATE_FILE = STATE_DIR .. "/state.json"
+local CLOSED_TABS_FILE = STATE_DIR .. "/closed_tabs.json"
 M.STATE_DIR = STATE_DIR
+M.CLOSED_TABS_FILE = CLOSED_TABS_FILE
 
 local function notify(message)
   if args.notify == false then return end
@@ -1472,6 +1476,109 @@ local function prune_block_records(snap)
   end
 end
 
+local function read_closed_tabs(path)
+  local data = read_json(path or CLOSED_TABS_FILE)
+  return type(data) == "table" and data or {}
+end
+
+function M.prune_closed_tabs(entries, now, max_items, max_age)
+  now = now or os.time()
+  max_items = max_items or CLOSED_TABS_MAX
+  max_age = max_age or CLOSED_TABS_MAX_AGE
+  local kept = {}
+  for _, e in ipairs(list(entries)) do
+    if type(e) == "table" and (e.kind == "window" or e.kind == "session") then
+      local ts = tonumber(e.closed_ts) or 0
+      if now - ts <= max_age then
+        kept[#kept + 1] = e
+      end
+    end
+  end
+  if #kept > max_items then
+    local trimmed = {}
+    for i = #kept - max_items + 1, #kept do
+      trimmed[#trimmed + 1] = kept[i]
+    end
+    return trimmed
+  end
+  return kept
+end
+
+function M.diff_closed(before, snap, now)
+  if type(before) ~= "table" or type(snap) ~= "table" then return {} end
+  local bi = before.server and before.server.instance_id
+  local si = snap.server and snap.server.instance_id
+  if not bi or not si or bi ~= si then return {} end
+  -- If every tab on the server vanished at once (e.g. server exit/teardown),
+  -- don't treat it as the user manually closing tabs.
+  if M.counts(snap).tabs == 0 then return {} end
+
+  now = now or os.time()
+  local closed_at = os.date("!%Y-%m-%dT%H:%M:%SZ", now)
+  local live_sessions = {}
+  for _, s in ipairs(list(snap.sessions)) do
+    if s.session_id then live_sessions[s.session_id] = s end
+  end
+
+  local closed = {}
+  for _, bs in ipairs(list(before.sessions)) do
+    local b_windows = list(bs.windows)
+    if #b_windows > 0 then
+      local live_s = bs.session_id and live_sessions[bs.session_id]
+      if not live_s then
+        if not M.is_default_session(bs) then
+          closed[#closed + 1] = {
+            kind = "session",
+            closed_at = closed_at,
+            closed_ts = now,
+            server_instance = bi,
+            session_id = bs.session_id,
+            session_label = bs.label,
+            session = bs,
+          }
+        end
+      else
+        local live_win_ids = {}
+        for _, lw in ipairs(list(live_s.windows)) do
+          if lw.window_id then live_win_ids[lw.window_id] = true end
+        end
+        local window_order = {}
+        for _, bw in ipairs(b_windows) do
+          if bw.window_id then window_order[#window_order + 1] = bw.window_id end
+        end
+        for wi, bw in ipairs(b_windows) do
+          if bw.window_id and not live_win_ids[bw.window_id] then
+            closed[#closed + 1] = {
+              kind = "window",
+              closed_at = closed_at,
+              closed_ts = now,
+              server_instance = bi,
+              session_id = bs.session_id,
+              session_label = bs.label,
+              window_id = bw.window_id,
+              window_index = wi,
+              window_order = window_order,
+              window = bw,
+            }
+          end
+        end
+      end
+    end
+  end
+  return closed
+end
+
+local function record_closed_tabs(before, snap, now, path)
+  local newly_closed = M.diff_closed(before, snap, now)
+  if #newly_closed == 0 then return end
+  local target = path or CLOSED_TABS_FILE
+  local stack = read_closed_tabs(target)
+  for _, entry in ipairs(newly_closed) do
+    stack[#stack + 1] = entry
+  end
+  write_json(target, M.prune_closed_tabs(stack, now))
+end
+
 local function save()
   ensure_dirs()
   local snap = collect()
@@ -1492,6 +1599,7 @@ local function save()
     notify(string.format("%d Rex tabs closed at once. rex-durable kept a copy. " ..
                          "To bring them back, run Durable: Repair Missing Tabs.", a.tabs - b.tabs))
   end
+  record_closed_tabs(before, snap)
   write_json(path, snap)
   add_history(snap)
   prune_block_records(snap)
@@ -2069,13 +2177,251 @@ local function repair(saved, dry_run)
   return chats, programs, tabs, sessions, planned_adds, planned_writes
 end
 
----------------------------------------------------------------------------
--- Modes
-
 local function tell(message)
   emit_text(message)
   if args.palette == true then notify(message) end
 end
+
+---------------------------------------------------------------------------
+-- Undoing recently closed tabs and sessions
+
+function M.insert_window_order(current_ids, new_id, before_ids, old_id, target_index)
+  local rest, pos_of = {}, {}
+  for _, id in ipairs(list(current_ids)) do
+    if id ~= new_id then
+      rest[#rest + 1] = id
+      pos_of[id] = #rest
+    end
+  end
+  local old_idx
+  for i, id in ipairs(list(before_ids)) do
+    if id == old_id then old_idx = i break end
+  end
+  local prev_pos, next_pos
+  if old_idx then
+    for i = old_idx - 1, 1, -1 do
+      if pos_of[before_ids[i]] then prev_pos = pos_of[before_ids[i]] break end
+    end
+    for i = old_idx + 1, #before_ids do
+      if pos_of[before_ids[i]] then next_pos = pos_of[before_ids[i]] break end
+    end
+  end
+  local pos
+  if prev_pos then
+    pos = prev_pos + 1
+  elseif next_pos then
+    pos = math.min(next_pos, target_index or next_pos)
+  else
+    pos = math.min(target_index or (#rest + 1), #rest + 1)
+  end
+  if pos < 1 then pos = 1 end
+  if pos > #rest + 1 then pos = #rest + 1 end
+  table.insert(rest, pos, new_id)
+  return rest
+end
+
+local function place_window_in_order(session_id, new_window_id, entry)
+  local view = session_view(session_id)
+  if not view then return end
+  local current_ids = {}
+  for _, w in ipairs(list(view.windows)) do
+    if w.window_id then current_ids[#current_ids + 1] = w.window_id end
+  end
+  local ordered = M.insert_window_order(
+    current_ids, new_window_id, entry.window_order, entry.window_id, entry.window_index
+  )
+  for _, id in ipairs(ordered) do
+    rex.call("session.move_window", { session_id = session_id, window_id = id })
+  end
+end
+
+local function inspect_entry_panes(windows, open, include_programs)
+  local seen = {}
+  for k, v in pairs(open or {}) do seen[k] = v end
+  local chats, skipped, programs = {}, {}, {}
+  for _, w in ipairs(list(windows)) do
+    for _, p in ipairs(M.panes(w and w.layout)) do
+      if p.kind == "chat" and p.id then
+        local key = p.app .. ":" .. p.id
+        if seen[key] then
+          skipped[#skipped + 1] = { app = p.app, id = p.id, reason = "already open" }
+        else
+          seen[key] = true
+          chats[#chats + 1] = { app = p.app, id = p.id, command = M.join(M.resume_argv(p)) }
+        end
+      elseif p.kind == "program" and include_programs and #list(p.argv) > 0 then
+        programs[#programs + 1] = { command = M.join(p.argv) }
+      end
+    end
+  end
+  return chats, skipped, programs
+end
+
+local function undo_close(dry_run)
+  ensure_dirs()
+  local raw = read_closed_tabs()
+  local stack = M.prune_closed_tabs(raw)
+  if #stack == 0 then
+    if #raw > 0 and not dry_run then write_json(CLOSED_TABS_FILE, {}) end
+    local msg = "No recently closed tabs to reopen."
+    tell(msg)
+    if JSON_MODE then
+      return { restored = false, dry_run = dry_run == true, remaining = 0, message = msg }
+    end
+    return
+  end
+
+  local entry = stack[#stack]
+  local live = collect()
+  local saved_for_open = entry.kind == "session"
+    and { sessions = { entry.session } }
+    or { sessions = { { session_id = entry.session_id, label = entry.session_label, windows = { entry.window } } } }
+  local open = open_chats(saved_for_open, live)
+  local already_open = {}
+  for k, v in pairs(open) do already_open[k] = v end
+  local windows = entry.kind == "session"
+    and list(entry.session and entry.session.windows)
+    or { entry.window }
+  local chats, skipped, programs = inspect_entry_panes(windows, open, args.programs ~= false)
+  local label = entry.session_label or entry.session_id or "session"
+
+  for _, s in ipairs(skipped) do
+    log(string.format("  skip %s chat %s: already open", s.app, s.id))
+  end
+
+  if dry_run then
+    if entry.kind == "session" then
+      emit_text(string.format("Would reopen closed session %s (%d tabs, %d chats, %d skipped).",
+        tostring(label), #windows, #chats, #skipped))
+    else
+      emit_text(string.format("Would reopen closed tab %s #%s (%d chats, %d skipped).",
+        tostring(label), tostring(entry.window_index or "?"), #chats, #skipped))
+    end
+    for _, c in ipairs(chats) do
+      log("  would run: " .. c.command)
+    end
+    if JSON_MODE then
+      return {
+        restored = false,
+        dry_run = true,
+        kind = entry.kind,
+        session_label = entry.session_label,
+        window_index = entry.window_index,
+        window_label = entry.kind == "window" and entry.window and entry.window.label or nil,
+        closed_at = entry.closed_at,
+        tabs = #windows,
+        chats = chats,
+        skipped = skipped,
+        programs = programs,
+        remaining = #stack - 1,
+      }
+    end
+    return
+  end
+
+  local instance_id = live and live.server and live.server.instance_id
+  local restored_session_id, restored_window_id
+  if entry.kind == "session" then
+    local new_sid, res = rebuild_session(entry.session, open, instance_id)
+    if not new_sid then
+      local msg = "Couldn't reopen closed session " .. tostring(label) .. "."
+      tell(msg)
+      if JSON_MODE then return { restored = false, dry_run = false, remaining = #stack, message = msg } end
+      return
+    end
+    restored_session_id = new_sid
+    restored_window_id = list(res and res.initial_windows)[1] and res.initial_windows[1].window_id or nil
+  else
+    local target
+    for _, s in ipairs(list(live.sessions)) do
+      if s.session_id == entry.session_id then target = s break end
+    end
+    if not target and entry.session_label then
+      for _, s in ipairs(list(live.sessions)) do
+        if s.label == entry.session_label then target = s break end
+      end
+    end
+    if target then
+      ensure_session(target.session_id)
+      local leaves = {}
+      local layout = create_layout(entry.window.layout, open, leaves)
+      local request = { session_id = target.session_id, layout = layout, focus = true }
+      if entry.window.label then request.window_label = entry.window.label end
+      local result, err = rex.call("session.new_window", request)
+      if not result then
+        local msg = "Couldn't reopen closed tab: " .. tostring(err)
+        tell(msg)
+        if JSON_MODE then return { restored = false, dry_run = false, remaining = #stack, message = msg } end
+        return
+      end
+      local new_writes = {}
+      local focus_bid = apply_window_fidelity(
+        target.session_id, result.window_id, result.block_ids, leaves, new_writes
+      )
+      place_window_in_order(target.session_id, result.window_id, entry)
+      rex.session.focus_window{ session_id = target.session_id, window_id = result.window_id }
+      if focus_bid then
+        rex.session.focus_block{ session_id = target.session_id, block_id = focus_bid }
+      end
+      local recorded = {}
+      for _, w in ipairs(new_writes) do
+        local key = w.pane and w.pane.app and w.pane.id and (w.pane.app .. ":" .. w.pane.id)
+        if not (key and already_open[key]) then recorded[#recorded + 1] = w end
+      end
+      record_reopened(instance_id, recorded)
+      rex.sleep(TYPE_DELAY)
+      restored_session_id, restored_window_id = target.session_id, result.window_id
+    else
+      local synth = {
+        session_id = entry.session_id,
+        label = entry.session_label,
+        windows = { entry.window },
+      }
+      local new_sid, res = rebuild_session(synth, open, instance_id)
+      if not new_sid then
+        local msg = "Couldn't reopen closed tab for missing session " .. tostring(label) .. "."
+        tell(msg)
+        if JSON_MODE then return { restored = false, dry_run = false, remaining = #stack, message = msg } end
+        return
+      end
+      restored_session_id = new_sid
+      restored_window_id = list(res and res.initial_windows)[1] and res.initial_windows[1].window_id or nil
+    end
+  end
+
+  table.remove(stack)
+  write_json(CLOSED_TABS_FILE, stack)
+
+  local summary
+  if entry.kind == "session" then
+    summary = string.format("Reopened closed session %s (%d tabs, %d chats).",
+      tostring(label), #windows, #chats)
+  else
+    summary = string.format("Reopened closed tab in %s (%d chats).", tostring(label), #chats)
+  end
+  tell(summary)
+  if JSON_MODE then
+    return {
+      restored = true,
+      dry_run = false,
+      kind = entry.kind,
+      session_id = restored_session_id,
+      session_label = entry.session_label,
+      window_id = restored_window_id,
+      window_index = entry.window_index,
+      window_label = entry.kind == "window" and entry.window and entry.window.label or nil,
+      closed_at = entry.closed_at,
+      tabs = #windows,
+      chats = chats,
+      skipped = skipped,
+      programs = programs,
+      remaining = #stack,
+    }
+  end
+end
+
+---------------------------------------------------------------------------
+-- Modes
 
 local function startup()
   ensure_dirs()
@@ -2340,6 +2686,9 @@ local function main()
     end
     return
   end
+  if mode == "undo_close" then
+    return undo_close(args.dry_run == true)
+  end
   if mode == "rebuild" then
     local live = collect()
     local saved = args.from and load_source(args.from) or previous_snapshot(live.server.instance_id)
@@ -2361,7 +2710,7 @@ local function main()
     return
   end
   error("unknown mode " .. tostring(mode) ..
-        "; use watch, status, save, reopen, repair, checkpoint, rebuild, or version", 0)
+        "; use watch, status, save, reopen, repair, undo_close, checkpoint, rebuild, or version", 0)
 end
 
 -- For the tests: the helpers that read processes and files.
