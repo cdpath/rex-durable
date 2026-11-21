@@ -3,7 +3,8 @@
  * It keeps its conversation's file/directory the way the real program does:
  *
  *   fx      holds FAKE_HOME/.fx/sessions/v2/<id>/lock open
- *   codex   holds FAKE_HOME/.codex/sessions/.../rollout-<time>-<id>.jsonl open
+ *   codex   holds FAKE_HOME/.codex/sessions/.../rollout-<time>-<id>.jsonl open;
+ *           with --no-rollout it opens nothing, like a new Codex before its first message
  *   claude  writes FAKE_HOME/.claude/projects/<folder>/<id>.jsonl and closes it
  *   pi      writes FAKE_HOME/.pi/agent/sessions/--<slug>--/..._<id>.jsonl and closes it
  *   agy     holds FAKE_HOME/.gemini/antigravity-cli/brain/<id> directory open
@@ -134,7 +135,12 @@ static void md5_hex(const char *input, char out[33]) {
 int main(int argc, char **argv) {
   const char *app = APP;
   char id[128] = "", child[128] = "";
+  int no_rollout = 0;
   for (int i = 1; i < argc; i++) {
+    if (!strcmp(argv[i], "--no-rollout")) {
+      no_rollout = 1;
+      continue;
+    }
     if (!strcmp(argv[i], "--child") && i + 1 < argc) {
       snprintf(child, sizeof child, "%s", argv[++i]);
       continue;
@@ -158,6 +164,12 @@ int main(int argc, char **argv) {
 
   char cwd[2048], dir[4096], file[4608];
   if (!getcwd(cwd, sizeof cwd)) return 1;
+
+  if (no_rollout) {
+    printf("fake %s without a rollout\n", app);
+    fflush(stdout);
+    for (;;) pause();
+  }
 
   if (!strcmp(app, "agy")) {
     if (child[0]) {

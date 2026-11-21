@@ -441,6 +441,39 @@ expect "rapid close LIFO: first undo restores most recently closed tab (tab 2 cl
 expect "rapid close LIFO: second undo restores earlier closed tab (tab 7 droid)" \
   sh -c "grep -q '\"window_index\":7' '$T/undo-lifo-2.json' && grep -q '$DROID_ID' '$T/undo-lifo-2.json'"
 
+# A new Codex writes its rollout only after the first message, and its daemon holds the file,
+# so the last save before the close still says "conversation unknown". Closing the tab must
+# look for the rollout again so undo resumes the conversation.
+LATE_ID=33333333-4444-4555-8666-777777777777
+mkdir -p "$T/late"
+R do -e "
+  local sid
+  for _, s in ipairs(rex.call('session.list').sessions or {}) do
+    if s.label == 'work' then sid = s.session_id end
+  end
+  rex.session.attach{ session_id = sid }
+  rex.call('session.new_window', { session_id = sid, focus = false, layout = { block = {
+    flavor = 'com.superlogical.terminal.shell',
+    options = { cwd = '$T/late', initial_input = \"'$T/bin/codex' --no-rollout\\n\" } } } })
+  return 'ok'
+" >/dev/null
+sleep 3
+D mode=save
+listing=$(show)
+LATE_TAB=$(printf '%s\n' "$listing" | awk '$1 == "work" && $6 == "--no-rollout" { split($2, a, "."); print a[1] }')
+expect "codex without a rollout saved as conversation unknown" test -n "$LATE_TAB"
+mkdir -p "$H/.codex/sessions/2026/11/21"
+printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$LATE_ID" "$T/late" \
+  >"$H/.codex/sessions/2026/11/21/rollout-2026-11-21T02-30-19-$LATE_ID.jsonl"
+rm -f "$T/durable/closed_tabs.json"
+HOME="$H" R do "$here/test/e2e_more.lua" action=close_tab label=work "index=$LATE_TAB" >/dev/null
+sleep 1
+D mode=save
+D mode=undo_close json=true >"$T/undo-late.json"
+sleep 3
+expect "undo resumes a codex whose rollout appeared after the last save" \
+  test "$(running "$T/bin/codex resume $LATE_ID")" = 1
+
 echo
 echo "$passed passed, $failed failed"
 [ "$failed" = 0 ]

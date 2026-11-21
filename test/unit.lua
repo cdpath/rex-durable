@@ -659,5 +659,52 @@ local after_unlock = M.pop_closed_tab(os.time(), stack_file, 0)
 check("pop_closed_tab: stack intact after failed lock attempt", after_unlock.window_id, "w_locked")
 rex.exec({ "rm", "-rf", lock_dir })
 
+-- refresh_closed: a chat saved as "conversation unknown" is resolved again when its tab closes
+local function unknown_pane(bid, cwd)
+  return { kind = "program", argv = { "codex" }, block_id = bid, cwd = cwd,
+           note = "conversation unknown", pending_app = "codex", started_at = 100 }
+end
+local function closed_win(p) return { kind = "window", window = { layout = { pane = p } } } end
+local function live_snap(panes)
+  local layout
+  for _, p in ipairs(panes) do
+    layout = layout and { split = { before = layout, after = { pane = p } } } or { pane = p }
+  end
+  return { sessions = { { windows = layout and { { layout = layout } } or {} } } }
+end
+local asked = {}
+local function late(p) asked[#asked + 1] = p; return "CODEX1", "/f/rollout-CODEX1.jsonl" end
+
+local rc = M.refresh_closed({ closed_win(unknown_pane("b1", "/w")) }, live_snap({}), late)
+local rp = rc[1].window.layout.pane
+check("refresh_closed: upgrades unknown codex pane to a resumable chat",
+  { rp.kind, rp.app, rp.id, rp.session_file, rp.note, rp.pending_app, asked[1].started_at },
+  { "chat", "codex", "CODEX1", "/f/rollout-CODEX1.jsonl", nil, nil, 100 })
+check("refresh_closed: upgraded pane resumes with codex resume <id>", M.resume_argv(rp), { "codex", "resume", "CODEX1" })
+
+rc = M.refresh_closed({ closed_win(unknown_pane("b1", "/w")) },
+  live_snap({ unknown_pane("b2", "/w") }), late)
+check("refresh_closed: skips when another unknown codex is still live in the same folder",
+  rc[1].window.layout.pane.kind, "program")
+
+rc = M.refresh_closed({ closed_win(unknown_pane("b1", "/w")) },
+  live_snap({ { kind = "chat", app = "codex", id = "CODEX1", cwd = "/w" } }), late)
+check("refresh_closed: never claims a session a live pane already owns",
+  rc[1].window.layout.pane.kind, "program")
+
+rc = M.refresh_closed({ closed_win(unknown_pane("b1", "/w")), closed_win(unknown_pane("b3", "/w")) },
+  live_snap({}), late)
+check("refresh_closed: skips two closed unknown panes sharing app and folder",
+  { rc[1].window.layout.pane.kind, rc[2].window.layout.pane.kind }, { "program", "program" })
+
+rc = M.refresh_closed({ closed_win(unknown_pane("b1", "/w")) }, live_snap({}), function() return nil end)
+check("refresh_closed: leaves pane unchanged when no session file exists yet",
+  { rc[1].window.layout.pane.kind, rc[1].window.layout.pane.pending_app }, { "program", "codex" })
+
+rc = M.refresh_closed({ { kind = "session", session = { windows = { { layout = { pane = unknown_pane("b1", "/w") } } } } } },
+  live_snap({}), late)
+check("refresh_closed: also upgrades panes inside a closed session",
+  rc[1].session.windows[1].layout.pane.id, "CODEX1")
+
 print(string.format("%d passed, %d failed", stats.passed, stats.failed))
 if stats.failed > 0 then rex.stop(1) end
