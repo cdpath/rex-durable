@@ -697,6 +697,16 @@ rc = M.refresh_closed({ closed_win(unknown_pane("b1", "/w")), closed_win(unknown
 check("refresh_closed: skips two closed unknown panes sharing app and folder",
   { rc[1].window.layout.pane.kind, rc[2].window.layout.pane.kind }, { "program", "program" })
 
+rc = M.refresh_closed({ closed_win(unknown_pane("b1", "/w")) }, live_snap({}), late,
+  { closed_win({ kind = "chat", app = "codex", id = "CODEX1", cwd = "/w" }) })
+check("refresh_closed: never claims a session already on the undo stack",
+  rc[1].window.layout.pane.kind, "program")
+
+rc = M.refresh_closed({ closed_win(unknown_pane("b1", "/w")) },
+  live_snap({ { kind = "chat", app = "claude", id = "CODEX1", cwd = "/other" } }), late)
+check("refresh_closed: the same id under another app doesn't block the claim",
+  rc[1].window.layout.pane.id, "CODEX1")
+
 rc = M.refresh_closed({ closed_win(unknown_pane("b1", "/w")) }, live_snap({}), function() return nil end)
 check("refresh_closed: leaves pane unchanged when no session file exists yet",
   { rc[1].window.layout.pane.kind, rc[1].window.layout.pane.pending_app }, { "program", "codex" })
@@ -711,6 +721,10 @@ check("is_background_holder: codex app-server daemon holds rollouts for exited c
     M.is_background_holder("codex resume 01a1fc80-fd6e-75d2-95da-a87ee582a601"),
     M.is_background_holder("codex"), M.is_background_holder(nil) },
   { true, false, false, false })
+
+check("parse_proc_fds: groups /proc fd links by pid, keeping spaces in paths",
+  M.parse_proc_fds("/proc/12/fd\t/h/.codex/sessions/a b.jsonl\n/proc/7/fd\t/x\n/proc/12/fd\t/y\njunk\n"),
+  { [7] = { "/x" }, [12] = { "/h/.codex/sessions/a b.jsonl", "/y" } })
 
 print(string.format("%d passed, %d failed", stats.passed, stats.failed))
 if stats.failed > 0 then rex.stop(1) end

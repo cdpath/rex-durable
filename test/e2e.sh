@@ -36,6 +36,7 @@ show() { HOME="$H" R do "$here/test/e2e_show.lua" "state_dir=$T/durable"; }
 
 server_pid=""
 watch_pid=""
+daemon_pid=""
 start_server() {
   env -u REX_SESSION -u REX_BLOCK -u REX_SERVER -u REX_CLIENT -u REX_CONFIG \
       -u PI_CODING_AGENT_DIR -u PI_CODING_AGENT_SESSION_DIR \
@@ -73,6 +74,7 @@ stop_watcher() {
   watch_pid=""
 }
 cleanup() {
+  if [ -n "$daemon_pid" ]; then kill "$daemon_pid" 2>/dev/null || true; fi
   stop_watcher
   stop_server
   for p in $(pgrep -f "^$T/(bin|other|share)/" || true); do kill "$p" 2>/dev/null || true; done
@@ -475,7 +477,7 @@ sleep 1
 D mode=save
 D mode=undo_close json=true >"$T/undo-late.json"
 sleep 3
-kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true
+kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true; daemon_pid=""
 expect "undo resumes a codex whose rollout appeared after the last save" \
   test "$(running "$T/bin/codex resume $LATE_ID")" = 1
 
