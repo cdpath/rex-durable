@@ -36,6 +36,7 @@ show() { HOME="$H" R do "$here/test/e2e_show.lua" "state_dir=$T/durable"; }
 
 server_pid=""
 watch_pid=""
+daemon_pid=""
 start_server() {
   env -u REX_SESSION -u REX_BLOCK -u REX_SERVER -u REX_CLIENT -u REX_CONFIG \
       -u PI_CODING_AGENT_DIR -u PI_CODING_AGENT_SESSION_DIR \
@@ -73,6 +74,7 @@ stop_watcher() {
   watch_pid=""
 }
 cleanup() {
+  if [ -n "$daemon_pid" ]; then kill "$daemon_pid" 2>/dev/null || true; fi
   stop_watcher
   stop_server
   for p in $(pgrep -f "^$T/(bin|other|share)/" || true); do kill "$p" 2>/dev/null || true; done
@@ -440,6 +442,44 @@ expect "rapid close LIFO: first undo restores most recently closed tab (tab 2 cl
   sh -c "grep -q '\"window_index\":2' '$T/undo-lifo-1.json' && grep -q '$CLAUDE_ID' '$T/undo-lifo-1.json'"
 expect "rapid close LIFO: second undo restores earlier closed tab (tab 7 droid)" \
   sh -c "grep -q '\"window_index\":7' '$T/undo-lifo-2.json' && grep -q '$DROID_ID' '$T/undo-lifo-2.json'"
+
+# A new Codex writes its rollout only after the first message, and its daemon holds the file,
+# so the last save before the close still says "conversation unknown". Closing the tab must
+# look for the rollout again, and undo must not treat the daemon's handle as an open chat.
+LATE_ID=33333333-4444-4555-8666-777777777777
+mkdir -p "$T/late"
+R do -e "
+  local sid
+  for _, s in ipairs(rex.call('session.list').sessions or {}) do
+    if s.label == 'work' then sid = s.session_id end
+  end
+  rex.session.attach{ session_id = sid }
+  rex.call('session.new_window', { session_id = sid, focus = false, layout = { block = {
+    flavor = 'com.superlogical.terminal.shell',
+    options = { cwd = '$T/late', initial_input = \"'$T/bin/codex' --no-rollout\\n\" } } } })
+  return 'ok'
+" >/dev/null
+sleep 3
+D mode=save
+listing=$(show)
+LATE_TAB=$(printf '%s\n' "$listing" | awk '$1 == "work" && $6 == "--no-rollout" { split($2, a, "."); print a[1] }')
+expect "codex without a rollout saved as conversation unknown" test -n "$LATE_TAB"
+mkdir -p "$H/.codex/sessions/2026/11/21"
+printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$LATE_ID" "$T/late" \
+  >"$H/.codex/sessions/2026/11/21/rollout-2026-11-21T02-30-19-$LATE_ID.jsonl"
+# Codex 0.171+ keeps the rollout open in its background app-server after the chat exits.
+bash -c 'exec 3<"$1"; exec -a "codex app-server" sleep 600' _ \
+  "$H/.codex/sessions/2026/11/21/rollout-2026-11-21T02-30-19-$LATE_ID.jsonl" &
+daemon_pid=$!
+rm -f "$T/durable/closed_tabs.json"
+HOME="$H" R do "$here/test/e2e_more.lua" action=close_tab label=work "index=$LATE_TAB" >/dev/null
+sleep 1
+D mode=save
+D mode=undo_close json=true >"$T/undo-late.json"
+sleep 3
+kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true; daemon_pid=""
+expect "undo resumes a codex whose rollout appeared after the last save" \
+  test "$(running "$T/bin/codex resume $LATE_ID")" = 1
 
 echo
 echo "$passed passed, $failed failed"

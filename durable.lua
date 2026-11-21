@@ -362,16 +362,42 @@ local function open_files(pids)
   return M.parse_lsof(stdout_of(argv))
 end
 
+-- find /proc -printf "%h\t%l\n" output: "/proc/<pid>/fd<TAB><path>".
+function M.parse_proc_fds(text)
+  local out = {}
+  for _, line in ipairs(lines(text)) do
+    local pid, path = line:match("^/proc/(%d+)/fd\t(.+)$")
+    if pid then
+      pid = tonumber(pid)
+      out[pid] = out[pid] or {}
+      table.insert(out[pid], path)
+    end
+  end
+  return out
+end
+
+-- Codex 0.171+ keeps every rollout open in its background app-server, even
+-- after the chat that wrote it has exited, so that holder says nothing about
+-- whether the chat is still open.
+function M.is_background_holder(args)
+  return type(args) == "string" and args:find("codex app-server", 1, true) ~= nil
+end
+
 -- Which of these paths some process has open right now.
 local function held_files(paths)
   local held = {}
   if #paths == 0 then return held end
-  local argv = { "lsof", "-nP", "-w", "-Fn", "--" }
+  local argv = { "lsof", "-nP", "-w", "-Fpn", "--" }
   for _, p in ipairs(paths) do argv[#argv + 1] = p end
   local r = run(argv)
   if r then
-    for _, line in ipairs(lines(r.stdout)) do
-      if line:sub(1, 1) == "n" then held[line:sub(2)] = true end
+    local by_pid, pids = M.parse_lsof(r.stdout), {}
+    for pid in pairs(by_pid) do pids[#pids + 1] = pid end
+    local ps = processes(pids)
+    for pid, files in pairs(by_pid) do
+      if not M.is_background_holder((ps[pid] or {}).args) then
+        for _, f in ipairs(files) do held[f] = true end
+      end
     end
     return held
   end
@@ -383,8 +409,15 @@ local function held_files(paths)
     argv[#argv + 1] = "-lname"
     argv[#argv + 1] = p
   end
-  for _, word in ipairs({ ")", "-printf", "%l\\n" }) do argv[#argv + 1] = word end
-  for _, line in ipairs(lines(stdout_of(argv))) do held[line] = true end
+  for _, word in ipairs({ ")", "-printf", "%h\\t%l\\n" }) do argv[#argv + 1] = word end
+  local found, pids = M.parse_proc_fds(stdout_of(argv)), {}
+  for pid in pairs(found) do pids[#pids + 1] = pid end
+  local ps = processes(pids)
+  for pid, files in pairs(found) do
+    if not M.is_background_holder((ps[pid] or {}).args) then
+      for _, f in ipairs(files) do held[f] = true end
+    end
+  end
   return held
 end
 
@@ -1123,7 +1156,8 @@ end
 
 local function newest_session_file(pane, info)
   if pane.app == "agy" then return nil end
-  local age = (info.ps[pane.pid] or {}).age or 0
+  local age = (info.ps[pane.pid] or {}).age
+    or (pane.started_at and math.max(0, info.now - pane.started_at)) or 0
   local since = info.now - age - 5
   if pane.app == "cursor-agent" then
     return newest_cursor_session(pane, since)
@@ -1197,6 +1231,10 @@ local function resolve_chats(pending, info, carried)
         end
       end
       if not pane.id then
+        if pane.app ~= "agy" then
+          pane.pending_app = pane.app
+          pane.started_at = info.now - ((info.ps[pane.pid] or {}).age or 0)
+        end
         pane.kind, pane.app, pane.session_file = "program", nil, nil
         pane.note = "conversation unknown"
       end
@@ -1647,9 +1685,69 @@ function M.diff_closed(before, snap, now)
   return closed
 end
 
+-- A chat saved as "conversation unknown" may have written its session file
+-- after the last save (e.g. Codex creates its rollout only on the first
+-- message). Look again when its tab is closed, unless another live pane of the
+-- same app in the same folder makes the newest file ambiguous.
+local function entry_panes(e)
+  local out = {}
+  local windows = e.window and { e.window } or list(e.session and e.session.windows)
+  for _, w in ipairs(windows) do M.panes(w.layout, out) end
+  return out
+end
+
+-- `earlier` is the undo stack before these closes: chats on it are taken too.
+function M.refresh_closed(entries, snap, resolver, earlier)
+  local claimed, live_unknown = {}, {}
+  local function claim(p)
+    if p.kind == "chat" and p.id then claimed[p.app .. ":" .. p.id] = true end
+  end
+  for _, s in ipairs(list(snap and snap.sessions)) do
+    for _, w in ipairs(list(s.windows)) do
+      for _, p in ipairs(M.panes(w.layout)) do
+        claim(p)
+        if p.pending_app then live_unknown[p.pending_app .. "\0" .. tostring(p.cwd)] = true end
+      end
+    end
+  end
+  for _, e in ipairs(list(earlier)) do
+    for _, p in ipairs(entry_panes(e)) do claim(p) end
+  end
+  local closed, seen = {}, {}
+  for _, e in ipairs(list(entries)) do
+    for _, p in ipairs(entry_panes(e)) do
+      claim(p)
+      if p.kind == "program" and p.pending_app then
+        local key = p.pending_app .. "\0" .. tostring(p.cwd)
+        seen[key] = (seen[key] or 0) + 1
+        closed[#closed + 1] = { pane = p, key = key }
+      end
+    end
+  end
+  for _, c in ipairs(closed) do
+    local p = c.pane
+    if not live_unknown[c.key] and seen[c.key] == 1 then
+      local id, file = resolver({ app = p.pending_app, cwd = p.cwd, argv = p.argv,
+                                  started_at = p.started_at })
+      if id and not claimed[p.pending_app .. ":" .. id] then
+        claimed[p.pending_app .. ":" .. id] = true
+        p.kind, p.app, p.id, p.session_file = "chat", p.pending_app, id, file
+        p.note, p.pending_app, p.started_at = nil, nil, nil
+      end
+    end
+  end
+  return entries
+end
+
+local function resolve_late(pane)
+  return newest_session_file(pane, { ps = {}, now = os.time() })
+end
+
 local function record_closed_tabs(before, snap, now, path)
   local newly_closed = M.diff_closed(before, snap, now)
   if #newly_closed == 0 then return end
+  local rok, rerr = pcall(M.refresh_closed, newly_closed, snap, resolve_late, read_closed_tabs(path))
+  if not rok then log("couldn't recheck closed chats: " .. tostring(rerr), "warn") end
   local ok, err = pcall(M.append_closed_tabs, newly_closed, now, path)
   if not ok then log("couldn't record closed tabs: " .. tostring(err), "warn") end
 end
