@@ -443,7 +443,7 @@ expect "rapid close LIFO: second undo restores earlier closed tab (tab 7 droid)"
 
 # A new Codex writes its rollout only after the first message, and its daemon holds the file,
 # so the last save before the close still says "conversation unknown". Closing the tab must
-# look for the rollout again so undo resumes the conversation.
+# look for the rollout again, and undo must not treat the daemon's handle as an open chat.
 LATE_ID=33333333-4444-4555-8666-777777777777
 mkdir -p "$T/late"
 R do -e "
@@ -465,12 +465,17 @@ expect "codex without a rollout saved as conversation unknown" test -n "$LATE_TA
 mkdir -p "$H/.codex/sessions/2026/11/21"
 printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$LATE_ID" "$T/late" \
   >"$H/.codex/sessions/2026/11/21/rollout-2026-11-21T02-30-19-$LATE_ID.jsonl"
+# Codex 0.171+ keeps the rollout open in its background app-server after the chat exits.
+bash -c 'exec 3<"$1"; exec -a "codex app-server" sleep 600' _ \
+  "$H/.codex/sessions/2026/11/21/rollout-2026-11-21T02-30-19-$LATE_ID.jsonl" &
+daemon_pid=$!
 rm -f "$T/durable/closed_tabs.json"
 HOME="$H" R do "$here/test/e2e_more.lua" action=close_tab label=work "index=$LATE_TAB" >/dev/null
 sleep 1
 D mode=save
 D mode=undo_close json=true >"$T/undo-late.json"
 sleep 3
+kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true
 expect "undo resumes a codex whose rollout appeared after the last save" \
   test "$(running "$T/bin/codex resume $LATE_ID")" = 1
 

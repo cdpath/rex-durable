@@ -362,16 +362,28 @@ local function open_files(pids)
   return M.parse_lsof(stdout_of(argv))
 end
 
+-- Codex 0.171+ keeps every rollout open in its background app-server, even
+-- after the chat that wrote it has exited, so that holder says nothing about
+-- whether the chat is still open.
+function M.is_background_holder(args)
+  return type(args) == "string" and args:find("codex app-server", 1, true) ~= nil
+end
+
 -- Which of these paths some process has open right now.
 local function held_files(paths)
   local held = {}
   if #paths == 0 then return held end
-  local argv = { "lsof", "-nP", "-w", "-Fn", "--" }
+  local argv = { "lsof", "-nP", "-w", "-Fpn", "--" }
   for _, p in ipairs(paths) do argv[#argv + 1] = p end
   local r = run(argv)
   if r then
-    for _, line in ipairs(lines(r.stdout)) do
-      if line:sub(1, 1) == "n" then held[line:sub(2)] = true end
+    local by_pid, pids = M.parse_lsof(r.stdout), {}
+    for pid in pairs(by_pid) do pids[#pids + 1] = pid end
+    local ps = processes(pids)
+    for pid, files in pairs(by_pid) do
+      if not M.is_background_holder((ps[pid] or {}).args) then
+        for _, f in ipairs(files) do held[f] = true end
+      end
     end
     return held
   end

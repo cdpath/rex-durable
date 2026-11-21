@@ -706,5 +706,11 @@ rc = M.refresh_closed({ { kind = "session", session = { windows = { { layout = {
 check("refresh_closed: also upgrades panes inside a closed session",
   rc[1].session.windows[1].layout.pane.id, "CODEX1")
 
+check("is_background_holder: codex app-server daemon holds rollouts for exited chats",
+  { M.is_background_holder("/Users/me/.codex/packages/app-server-daemon/releases/0.171.0/bin/codex app-server --listen unix:// --managed-daemon"),
+    M.is_background_holder("codex resume 01a1fc80-fd6e-75d2-95da-a87ee582a601"),
+    M.is_background_holder("codex"), M.is_background_holder(nil) },
+  { true, false, false, false })
+
 print(string.format("%d passed, %d failed", stats.passed, stats.failed))
 if stats.failed > 0 then rex.stop(1) end
